@@ -1487,7 +1487,7 @@ impl<'a> JoinstrInner<'a> {
                 }
                 Err(e) => {
                     log::debug!("JoinstrInner::try_finalize_coinjoin() fail to finalize: {e:?}");
-                    Ok(false)
+                    Err(e.into())
                 }
             }
         } else {
