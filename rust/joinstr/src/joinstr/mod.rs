@@ -705,6 +705,10 @@ impl Joinstr<'_> {
             } => start + max_duration,
             Timeline::Timeout { max_duration, .. } => now() + max_duration,
         };
+        log::debug!(
+            "Joinstr::register_inputs() initial inputs: {:#?}",
+            inner.inputs
+        );
         drop(inner);
         if now() > expired {
             return Err(Error::Timeout);
@@ -1467,6 +1471,11 @@ impl<'a> JoinstrInner<'a> {
     /// This function will return an error if [`Joinstr::coinjoin`] is None.
     fn try_finalize_coinjoin(&mut self) -> Result<bool, Error> {
         let coinjoin = self.coinjoin_as_mut()?;
+        log::debug!(
+            "JoinstrInner::try_finalize_coinjoin() inputs: {}, outputs: {}",
+            coinjoin.inputs_len(),
+            coinjoin.outputs_len()
+        );
         if coinjoin.inputs_len() >= coinjoin.outputs_len() && coinjoin.generate_tx(false).is_ok() {
             log::info!(
                 "Coordinator({}).register_input(): coinjoin finalyzed!",
