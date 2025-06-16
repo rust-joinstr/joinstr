@@ -1476,12 +1476,20 @@ impl<'a> JoinstrInner<'a> {
             coinjoin.inputs_len(),
             coinjoin.outputs_len()
         );
-        if coinjoin.inputs_len() >= coinjoin.outputs_len() && coinjoin.generate_tx(false).is_ok() {
-            log::info!(
-                "Coordinator({}).register_input(): coinjoin finalyzed!",
-                self.client.name,
-            );
-            Ok(true)
+        if coinjoin.inputs_len() >= coinjoin.outputs_len() {
+            match coinjoin.generate_tx(false) {
+                Ok(_) => {
+                    log::info!(
+                        "Coordinator({}).register_input(): coinjoin finalyzed!",
+                        self.client.name,
+                    );
+                    Ok(true)
+                }
+                Err(e) => {
+                    log::debug!("JoinstrInner::try_finalize_coinjoin() fail to finalize: {e:?}");
+                    Ok(false)
+                }
+            }
         } else {
             Ok(false)
         }
