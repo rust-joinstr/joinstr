@@ -443,7 +443,6 @@ impl Joinstr<'_> {
     fn join_pool(&mut self) -> Result<(), Error> {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.pool_exists()?;
-        inner.step = Step::Connecting;
         let pool_npub = inner.pool_as_ref()?.public_key;
         // TODO: receive the response on a derived npub;
         let my_npub = inner.client.get_keys()?.public_key();
@@ -477,7 +476,6 @@ impl Joinstr<'_> {
                     new_client.connect_nostr()?;
                     inner.client = new_client;
                     connected = true;
-                    inner.step = Step::OutputRegistration;
                     break;
                 } else {
                     log::error!(
@@ -875,18 +873,21 @@ impl Joinstr<'_> {
             log::debug!("Joinstr::start_coinjoin_blocking({name}) try to join pool...");
             inner.pool_not_exists()?;
             inner.pool = Some(pool);
+            inner.step = Step::Connecting;
             drop(inner);
             self.join_pool()?;
             log::debug!("Joinstr::start_coinjoin_blocking({name}) pool joined");
         } else {
             // broadcast the pool event
             log::debug!("Joinstr::start_coinjoin_blocking({name}) try to broadcast pool...");
+            inner.step = Step::Posting;
             inner.post()?;
             log::debug!("Joinstr::start_coinjoin_blocking({name}) pool broadcast!");
             drop(inner);
         }
         notif();
 
+        self.inner.lock().expect("poisoned").step = Step::OutputRegistration;
         log::debug!("Joinstr::start_coinjoin_blocking({name}) start register outputs..");
         // register peers & outputs
         self.register_outputs(&notif)?;
@@ -918,12 +919,16 @@ impl Joinstr<'_> {
         log::debug!(
             "Joinstr::start_coinjoin_blocking({name}) start registering external inputs..."
         );
+        self.inner.lock().expect("poisoned").step = Step::InputRegistration;
         self.register_inputs(&notif)?;
 
         log::debug!("Joinstr::start_coinjoin_blocking({name}) inputs registerd!");
 
         log::debug!("Joinstr::start_coinjoin_blocking({name}) try broadcast tx...");
+        self.inner.lock().expect("poisoned").step = Step::Broadcast;
         self.inner.lock().expect("poisoned").broadcast_tx()?;
+        // FIXME: wait the tx mined to change the step
+        self.inner.lock().expect("poisoned").step = Step::Mined;
         log::debug!("Joinstr::start_coinjoin_blocking({name}) tx broadcast!");
         notif();
 
@@ -1229,7 +1234,6 @@ impl<'a> JoinstrInner<'a> {
         self.is_ready()?;
         self.pool_not_exists()?;
 
-        self.step = Step::Posting;
         let public_key = self.client.get_keys()?.public_key();
         let transport = crate::nostr::Transport {
             vpn: Some(Vpn {
@@ -1270,7 +1274,6 @@ impl<'a> JoinstrInner<'a> {
         };
         self.client.post_event(pool.clone().try_into()?)?;
         self.pool = Some(pool);
-        self.step = Step::OutputRegistration;
         Ok(())
     }
 
@@ -1528,7 +1531,6 @@ impl<'a> JoinstrInner<'a> {
             client.broadcast(&tx)?;
         }
         self.final_tx = Some(tx);
-        self.step = Step::Broadcast;
         Ok(())
     }
 
