@@ -458,8 +458,9 @@ impl Joinstr<'_> {
         let mut connected = false;
         while now() < timeout {
             let mut inner = self.inner.lock().expect("poisoned");
-            if let Some(PoolMessage::Credentials(Credentials { id, private_key, .. })) =
-                inner.client.try_receive_pool_msg()?
+            if let Some(PoolMessage::Credentials(Credentials {
+                id, private_key, ..
+            })) = inner.client.try_receive_pool_msg()?
             {
                 log::debug!(
                     "Coordinator({}).connect_to_pool(): receive credentials.",
@@ -572,7 +573,12 @@ impl Joinstr<'_> {
                                     transport: payload.map(|p| {
                                         if p.transport.tor.as_ref().map_or(false, |t| t.enable) {
                                             "tor".into()
-                                        } else if p.transport.vpn.as_ref().map_or(false, |v| v.enable) {
+                                        } else if p
+                                            .transport
+                                            .vpn
+                                            .as_ref()
+                                            .map_or(false, |v| v.enable)
+                                        {
                                             "vpn".into()
                                         } else {
                                             String::new()
@@ -593,8 +599,12 @@ impl Joinstr<'_> {
                             );
                         }
                     }
-                    // TODO: do not panic here
-                    (PoolMessage::Join(None), _) => panic!("cannot answer if npub is None!"),
+                    (PoolMessage::Join(None), _) => {
+                        log::error!(
+                            "Coordinator({}).register_outputs(): received Join with no npub, skipping",
+                            inner.client.name
+                        );
+                    }
                     (PoolMessage::Output(o), _) => {
                         log::error!(
                             "Coordinator({}).register_outputs(): receive Output({:?}) request before output registartion step!",
@@ -659,10 +669,12 @@ impl Joinstr<'_> {
                         inner.outputs.push(o.assume_checked());
                         notif();
                     }
-                    // FIXME: here it can be some cases where, because network timing, we can
-                    // receive a signed input before the output registration round ended, we should
-                    // store those inputs in order to use them later.
-                    PoolMessage::Input(_) => todo!("store input"),
+                    PoolMessage::Input(_) => {
+                        log::warn!(
+                            "Coordinator({}).register_outputs(): received Input during output registration, ignoring",
+                            inner.client.name
+                        );
+                    }
                     r => {
                         // NOTE: simply drop other kind of messages
                         log::debug!(
@@ -1466,7 +1478,7 @@ impl<'a> JoinstrInner<'a> {
             use miniscript::bitcoin::psbt;
             psbt.inputs[0] = psbt::Input {
                 witness_utxo: Some(input.txout.clone()),
-                sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)),
+                sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)), // SIGHASH_ALL | SIGHASH_ANYONECANPAY
                 final_script_witness: Some(signed_input.txin.witness.clone()),
                 ..Default::default()
             };

@@ -61,7 +61,8 @@ impl TryFrom<Psbt> for InputDataSigned {
                 return Err(Error::WitnessMissing);
             }
         }
-        Ok(InputDataSigned { txin, amount: None })
+        let amount = value.inputs[0].witness_utxo.as_ref().map(|utxo| utxo.value);
+        Ok(InputDataSigned { txin, amount })
     }
 }
 
@@ -114,6 +115,9 @@ mod serde_relay {
         match value {
             serde_json::Value::String(s) => Ok(s),
             serde_json::Value::Array(arr) => {
+                if arr.is_empty() {
+                    return Ok(String::new());
+                }
                 let first = arr.into_iter().find_map(|v| {
                     if let serde_json::Value::String(s) = v {
                         Some(s)
@@ -121,7 +125,9 @@ mod serde_relay {
                         None
                     }
                 });
-                Ok(first.unwrap_or_default())
+                first.ok_or_else(|| {
+                    serde::de::Error::custom("relay array contains no string entries")
+                })
             }
             _ => Err(serde::de::Error::custom("relay must be a string or array")),
         }
@@ -329,14 +335,8 @@ fn default_network() -> Network {
 #[serde(untagged)]
 pub enum Timeline {
     Simple(u64),
-    Fixed {
-        start: u64,
-        max_duration: u64,
-    },
-    Timeout {
-        timeout: u64,
-        max_duration: u64,
-    },
+    Fixed { start: u64, max_duration: u64 },
+    Timeout { timeout: u64, max_duration: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -443,8 +443,7 @@ mod serde_denomination_opt {
             Some(serde_json::Value::Number(n)) => {
                 if n.is_f64() {
                     Ok(Some(
-                        Amount::from_btc(n.as_f64().unwrap())
-                            .map_err(serde::de::Error::custom)?,
+                        Amount::from_btc(n.as_f64().unwrap()).map_err(serde::de::Error::custom)?,
                     ))
                 } else if let Some(i) = n.as_u64() {
                     Ok(Some(Amount::from_sat(i)))
@@ -522,8 +521,8 @@ impl FromStr for PoolMessage {
                         if let Some(Value::String(psbt_b64)) = map.get("psbt") {
                             let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64)
                                 .map_err(|_| ParsingError::Base64)?;
-                            let psbt: Psbt = Psbt::deserialize(&psbt_bytes)
-                                .map_err(|_| ParsingError::Psbt)?;
+                            let psbt: Psbt =
+                                Psbt::deserialize(&psbt_bytes).map_err(|_| ParsingError::Psbt)?;
                             let input: InputDataSigned =
                                 psbt.try_into().map_err(|_| ParsingError::Input)?;
                             Ok(Self::Input(input))
@@ -581,8 +580,7 @@ impl FromStr for PoolMessage {
             // Python credentials have no "type" field — they send the full pool info
             // with a "private_key" field directly
             if map.contains_key("private_key") && map.contains_key("id") {
-                let cred: Credentials =
-                    serde_json::from_value(Value::Object(map))?;
+                let cred: Credentials = serde_json::from_value(Value::Object(map))?;
                 return Ok(Self::Credentials(cred));
             }
         }

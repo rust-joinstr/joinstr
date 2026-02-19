@@ -73,7 +73,7 @@ fn test_pool_notif() {
     std::thread::sleep(Duration::from_secs(3));
 
     let pool = Pool {
-        versions: default_version(),
+        version: default_version(),
         id: "123".into(),
         pool_type: PoolType::Create,
         public_key: PublicKey::parse(
@@ -85,7 +85,7 @@ fn test_pool_notif() {
             denomination: Amount::from_btc(0.1).unwrap(),
             peers: 5,
             timeout: Timeline::Simple(12345),
-            relays: Vec::new(),
+            relay: String::new(),
             fee: Fee::Fixed(12),
             transport: Transport {
                 vpn: Some(Vpn {
@@ -94,6 +94,7 @@ fn test_pool_notif() {
                 }),
                 tor: None,
             },
+            vpn_gateway: None,
         }),
     };
 
