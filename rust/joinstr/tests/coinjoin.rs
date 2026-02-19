@@ -8,7 +8,7 @@ use miniscript::bitcoin::Amount;
 #[test]
 fn simple_tx() {
     let (mut signer, mut client, _electrsd, bitcoind) =
-        funded_wallet(&[0.11, 0.11, 0.11, 0.11, 0.11]);
+        funded_wallet(&[0.10003, 0.10003, 0.10003, 0.10003, 0.10003]);
 
     signer.set_client(client.clone());
 
@@ -47,7 +47,7 @@ fn simple_tx() {
 #[test]
 fn simple_coinjoin() {
     let (mut signer, mut client, _electrsd, bitcoind) =
-        funded_wallet(&[0.11, 0.11, 0.11, 0.11, 0.11]);
+        funded_wallet(&[0.10003, 0.10003, 0.10003, 0.10003, 0.10003]);
 
     signer.set_client(client.clone());
 

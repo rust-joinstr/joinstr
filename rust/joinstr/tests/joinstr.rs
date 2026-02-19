@@ -159,7 +159,7 @@ fn simple_coinjoin() {
 
     log::info!("Received pool notification.");
 
-    let mut signer = funded_wallet_with_bitcoind(&[0.011, 0.011], &bitcoind);
+    let mut signer = funded_wallet_with_bitcoind(&[0.01003, 0.01003], &bitcoind);
     let client = Client::new(&url, port).unwrap();
     signer.set_client(client);
 
