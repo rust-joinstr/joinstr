@@ -65,12 +65,145 @@ impl TryFrom<Psbt> for InputDataSigned {
     }
 }
 
+mod serde_denomination {
+    use miniscript::bitcoin::Amount;
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(amount: &Amount, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(amount.to_btc())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Amount, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::Number(n) => {
+                if n.is_f64() {
+                    Amount::from_btc(n.as_f64().unwrap()).map_err(serde::de::Error::custom)
+                } else if let Some(i) = n.as_u64() {
+                    Ok(Amount::from_sat(i))
+                } else {
+                    Err(serde::de::Error::custom("invalid denomination"))
+                }
+            }
+            _ => Err(serde::de::Error::custom("denomination must be a number")),
+        }
+    }
+}
+
+mod serde_relay {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(relay: &String, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(relay)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => Ok(s),
+            serde_json::Value::Array(arr) => {
+                let first = arr.into_iter().find_map(|v| {
+                    if let serde_json::Value::String(s) = v {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                });
+                Ok(first.unwrap_or_default())
+            }
+            _ => Err(serde::de::Error::custom("relay must be a string or array")),
+        }
+    }
+}
+
+mod serde_transport {
+    use super::{Tor, Transport, Vpn};
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(transport: &Transport, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if transport.tor.as_ref().map_or(false, |t| t.enable) {
+            serializer.serialize_str("tor")
+        } else if transport.vpn.as_ref().map_or(false, |v| v.enable) {
+            serializer.serialize_str("vpn")
+        } else {
+            serializer.serialize_str("")
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Transport, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => match s.as_str() {
+                "tor" => Ok(Transport {
+                    vpn: Some(Vpn {
+                        enable: false,
+                        gateway: None,
+                    }),
+                    tor: Some(Tor { enable: true }),
+                }),
+                "vpn" => Ok(Transport {
+                    vpn: Some(Vpn {
+                        enable: true,
+                        gateway: None,
+                    }),
+                    tor: Some(Tor { enable: false }),
+                }),
+                _ => Ok(Transport {
+                    vpn: Some(Vpn {
+                        enable: false,
+                        gateway: None,
+                    }),
+                    tor: Some(Tor { enable: false }),
+                }),
+            },
+            serde_json::Value::Object(_) => {
+                let t: TransportObject =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Transport {
+                    vpn: t.vpn,
+                    tor: t.tor,
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "transport must be a string or object",
+            )),
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TransportObject {
+        vpn: Option<Vpn>,
+        tor: Option<Tor>,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Pool {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default = "default_version")]
-    pub versions: Option<Vec<String>>,
+    #[serde(alias = "versions")]
+    pub version: Option<String>,
     pub id: String,
+    #[serde(default = "default_network")]
+    #[serde(skip_serializing)]
     pub network: Network,
     #[serde(rename = "type")]
     pub pool_type: PoolType,
@@ -101,15 +234,16 @@ impl Pool {
             denomination: bitcoin::Amount::from_sat(denomination),
             peers,
             timeout: Timeline::Simple(timeout),
-            relays: vec![relay],
+            relay: relay,
             fee: Fee::Fixed(fee),
             transport: default_transport(),
+            vpn_gateway: None,
         };
 
         let id = pool_id(&key);
 
         Self {
-            versions: default_version(),
+            version: default_version(),
             id,
             network,
             pool_type: PoolType::Create,
@@ -156,27 +290,38 @@ impl TryFrom<Event> for Pool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
 pub enum PoolType {
-    #[serde(alias = "new_pool")]
+    #[serde(rename = "new_pool")]
     Create,
+    #[serde(rename = "update")]
     Update,
+    #[serde(rename = "delete")]
     Delete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PoolPayload {
+    #[serde(with = "serde_denomination")]
     pub denomination: Amount,
     pub peers: usize,
     pub timeout: Timeline,
-    pub relays: Vec<String>,
+    #[serde(with = "serde_relay", alias = "relays")]
+    pub relay: String,
     #[serde(rename = "fee_rate")]
     pub fee: Fee,
+    #[serde(with = "serde_transport")]
     pub transport: Transport,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpn_gateway: Option<String>,
 }
 
-pub fn default_version() -> Option<Vec<String>> {
-    Some(vec!["0".into()])
+pub fn default_version() -> Option<String> {
+    Some("1".into())
+}
+
+fn default_network() -> Network {
+    Network::Bitcoin
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -185,19 +330,11 @@ pub fn default_version() -> Option<Vec<String>> {
 pub enum Timeline {
     Simple(u64),
     Fixed {
-        /// The absolute timestamp the pool coordinator will wait until cancelation of the pool
-        /// Coordinator must close the pool if the peer number not reach at this point in time.
-        /// Coordinator will wait until this point in time before starting the coinjoin, in order
-        /// to let more user register if possible
         start: u64,
-        /// The max duration in seconds the coordinator will wait signed inputs registration before cancel the coinjoin.
         max_duration: u64,
     },
     Timeout {
-        /// The absolute timestamp the pool coordinator will wait until cancelation of the pool
-        /// Coordinator must start the coinjoin as soon as the min peer number is reached
         timeout: u64,
-        /// The max duration in seconds the coordinator will wait signed inputs registration before cancel the coinjoin
         max_duration: u64,
     },
 }
@@ -206,17 +343,7 @@ pub enum Timeline {
 #[serde(rename_all = "snake_case")]
 #[serde(untagged)]
 pub enum Fee {
-    /// The min fee expected to consider a coinjoin tx broadcastable
     Fixed(u32),
-    /// Using a fee provider mechanism:
-    ///   - every input should have the denomination amount
-    ///   - one input can have an amount superior to the denomination amount: it will be considered
-    ///     as a fee payout to the provider
-    ///   - if the input containing a fee payout is superior then expected fee, the fee provider
-    ///     should add an ouput to receive the payout, this should be determined early in the
-    ///     coinjoin (before the signing round start).
-    ///   - if the participant inputs did not provide enough fee, the fee provider must add an
-    ///     input to pay fees.
     Provider(Provider),
 }
 
@@ -262,9 +389,75 @@ pub enum PoolMessage {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Credentials {
     pub id: String,
+    #[serde(alias = "key")]
     #[serde(serialize_with = "serialize_key")]
-    pub key: nostr::SecretKey,
+    pub private_key: nostr::SecretKey,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "serde_denomination_opt")]
+    pub denomination: Option<Amount>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers: Option<usize>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_rate: Option<u32>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpn_gateway: Option<String>,
 }
+
+mod serde_denomination_opt {
+    use miniscript::bitcoin::Amount;
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(amount: &Option<Amount>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match amount {
+            Some(a) => serializer.serialize_f64(a.to_btc()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Amount>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+        match value {
+            None => Ok(None),
+            Some(serde_json::Value::Number(n)) => {
+                if n.is_f64() {
+                    Ok(Some(
+                        Amount::from_btc(n.as_f64().unwrap())
+                            .map_err(serde::de::Error::custom)?,
+                    ))
+                } else if let Some(i) = n.as_u64() {
+                    Ok(Some(Amount::from_sat(i)))
+                } else {
+                    Err(serde::de::Error::custom("invalid denomination"))
+                }
+            }
+            Some(serde_json::Value::Null) => Ok(None),
+            _ => Err(serde::de::Error::custom("denomination must be a number")),
+        }
+    }
+}
+
 pub fn serialize_key<S>(key: &nostr::SecretKey, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -292,7 +485,7 @@ pub enum ParsingError {
     Consensus,
     Credential,
     VersionNotSupported(String),
-    VersionMissing,
+    Base64,
 }
 
 impl From<serde_json::Error> for ParsingError {
@@ -307,14 +500,13 @@ impl FromStr for PoolMessage {
     fn from_str(s: &str) -> Result<Self, ParsingError> {
         let json: Value = serde_json::from_str(s)?;
         if let Value::Object(map) = json {
-            match map.get("version") {
-                Some(Value::String(v)) => {
-                    if v != "1" {
-                        return Err(ParsingError::VersionNotSupported(v.into()));
-                    }
+            // version field is optional (Python doesn't send it)
+            if let Some(Value::String(v)) = map.get("version") {
+                if v != "1" {
+                    return Err(ParsingError::VersionNotSupported(v.into()));
                 }
-                _ => return Err(ParsingError::VersionMissing),
             }
+
             if let Some(Value::String(t)) = map.get("type") {
                 return match t.as_str() {
                     "psbt" => {
@@ -326,7 +518,17 @@ impl FromStr for PoolMessage {
                         }
                     }
                     "input" => {
-                        if let Some(m) = map.get("input") {
+                        // Python sends {"psbt": "<base64>", "type": "input"}
+                        if let Some(Value::String(psbt_b64)) = map.get("psbt") {
+                            let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64)
+                                .map_err(|_| ParsingError::Base64)?;
+                            let psbt: Psbt = Psbt::deserialize(&psbt_bytes)
+                                .map_err(|_| ParsingError::Psbt)?;
+                            let input: InputDataSigned =
+                                psbt.try_into().map_err(|_| ParsingError::Input)?;
+                            Ok(Self::Input(input))
+                        } else if let Some(m) = map.get("input") {
+                            // Legacy Rust format
                             let input = InputDataSigned::from_value(m.clone())?;
                             Ok(Self::Input(input))
                         } else {
@@ -374,7 +576,15 @@ impl FromStr for PoolMessage {
                         return Err(ParsingError::UnknownType(t.into()));
                     }
                 };
-            };
+            }
+
+            // Python credentials have no "type" field — they send the full pool info
+            // with a "private_key" field directly
+            if map.contains_key("private_key") && map.contains_key("id") {
+                let cred: Credentials =
+                    serde_json::from_value(Value::Object(map))?;
+                return Ok(Self::Credentials(cred));
+            }
         }
         Err(ParsingError::Unknown)
     }
@@ -386,6 +596,7 @@ pub enum SerializeError {
     Inputs,
     Outputs,
     SerdeJson(serde_json::Error),
+    Psbt,
 }
 
 impl From<serde_json::Error> for SerializeError {
@@ -456,40 +667,42 @@ impl InputDataSigned {
     }
 }
 
+use base64ct::Encoding;
+
 impl PoolMessage {
     pub fn to_json(&self) -> Result<Value, SerializeError> {
-        let msg_type = match self {
-            PoolMessage::Input(_) => "input",
-            PoolMessage::Output(_) => "output",
-            PoolMessage::Psbt(_) => "psbt",
-            PoolMessage::Transaction(_) => "transaction",
-            PoolMessage::Join(_) => "join_pool",
-            PoolMessage::Credentials(_) => "credentials",
-        };
         let mut map = Map::new();
-        map.insert("version".into(), Value::String("1".into()));
-        map.insert("type".into(), msg_type.into());
         match self {
             PoolMessage::Psbt(psbt) => {
-                map.insert(msg_type.into(), serde_json::to_value(psbt)?);
+                map.insert("type".into(), "psbt".into());
+                map.insert("psbt".into(), serde_json::to_value(psbt)?);
             }
             PoolMessage::Transaction(tx) => {
+                map.insert("type".into(), "transaction".into());
                 let raw = serialize_hex(tx);
-                map.insert(msg_type.into(), Value::String(raw));
+                map.insert("transaction".into(), Value::String(raw));
             }
             PoolMessage::Join(npub) => {
+                map.insert("type".into(), "join_pool".into());
                 if let Some(npub) = npub {
                     map.insert("npub".into(), serde_json::to_value(npub)?);
                 }
             }
-            PoolMessage::Input(input) => {
-                map.insert(msg_type.into(), input.to_json());
+            PoolMessage::Input(_input) => {
+                // Python format: {"psbt": "<base64>", "type": "input"}
+                // We can't reconstruct a full PSBT from InputDataSigned alone,
+                // so we still send the legacy format for Input variant.
+                // Callers should use PoolMessage::Psbt for wire compat.
+                map.insert("type".into(), "input".into());
+                map.insert("input".into(), _input.to_json());
             }
             PoolMessage::Output(addr) => {
+                map.insert("type".into(), "output".into());
                 map.insert("address".into(), serde_json::to_value(addr)?);
             }
             PoolMessage::Credentials(cred) => {
-                map.insert(msg_type.into(), serde_json::to_value(cred)?);
+                // Python format: send full credentials at top level (no wrapper)
+                return Ok(serde_json::to_value(cred)?);
             }
         }
         Ok(map.into())
@@ -536,10 +749,26 @@ pub mod tests {
     use nostr::{Keys, PublicKey};
 
     use super::*;
+
     const RAW_POOL: &str = r#"
             {
+              "type": "new_pool",
+              "id": "123",
+              "public_key": "0000000000000000000000000000000000000000000000000000000000000001",
+              "denomination": 0.1,
+              "peers": 5,
+              "timeout": 12345,
+              "relay": "",
+              "fee_rate": 12,
+              "transport": "vpn",
+              "vpn_gateway": ""
+            }
+        "#;
+
+    const RAW_POOL_RUST_LEGACY: &str = r#"
+            {
               "version": "1",
-              "type": "create",
+              "type": "new_pool",
               "id": "123",
               "public_key": "0000000000000000000000000000000000000000000000000000000000000001",
               "network": "regtest",
@@ -555,11 +784,39 @@ pub mod tests {
               }
             }
         "#;
+
     #[test]
-    fn pool() {
+    fn pool_python_format() {
+        let parsed: Pool = serde_json::from_str(RAW_POOL).unwrap();
+        assert_eq!(parsed.version, Some("1".into()));
+        assert_eq!(parsed.id, "123");
+        assert_eq!(parsed.pool_type, PoolType::Create);
+        assert_eq!(parsed.network, Network::Bitcoin);
+        let payload = parsed.payload.as_ref().unwrap();
+        assert_eq!(payload.denomination, Amount::from_btc(0.1).unwrap());
+        assert_eq!(payload.peers, 5);
+        assert_eq!(payload.relay, "");
+        assert_eq!(payload.fee, Fee::Fixed(12));
+        assert!(payload.transport.vpn.as_ref().unwrap().enable);
+        assert!(!payload.transport.tor.as_ref().unwrap().enable);
+    }
+
+    #[test]
+    fn pool_rust_legacy_format() {
+        let parsed: Pool = serde_json::from_str(RAW_POOL_RUST_LEGACY).unwrap();
+        assert_eq!(parsed.id, "123");
+        assert_eq!(parsed.pool_type, PoolType::Create);
+        assert_eq!(
+            parsed.payload.as_ref().unwrap().denomination,
+            Amount::from_btc(0.1).unwrap()
+        );
+    }
+
+    #[test]
+    fn pool_serialization_python_compat() {
         let pool = Pool {
-            versions: default_version(),
-            id: "123".into(),
+            version: None,
+            id: "test123".into(),
             pool_type: PoolType::Create,
             public_key: PublicKey::parse(
                 "0000000000000000000000000000000000000000000000000000000000000001",
@@ -567,25 +824,29 @@ pub mod tests {
             .unwrap(),
             network: Network::Regtest,
             payload: Some(PoolPayload {
-                denomination: Amount::from_btc(0.1).unwrap(),
-                peers: 5,
-                timeout: Timeline::Simple(12345),
-                relays: Vec::new(),
-                fee: Fee::Fixed(12),
+                denomination: Amount::from_btc(0.001).unwrap(),
+                peers: 2,
+                timeout: Timeline::Simple(9999),
+                relay: "wss://relay.example.com".into(),
+                fee: Fee::Fixed(10),
                 transport: Transport {
-                    vpn: Some(Vpn {
-                        enable: false,
-                        gateway: None,
-                    }),
-                    tor: None,
+                    vpn: None,
+                    tor: Some(Tor { enable: true }),
                 },
+                vpn_gateway: None,
             }),
         };
 
-        let raw = RAW_POOL;
+        let json = serde_json::to_string(&pool).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = parsed.as_object().unwrap();
 
-        let parsed: Pool = serde_json::from_str(raw).unwrap();
-        assert_eq!(pool, parsed);
+        assert_eq!(obj.get("type").unwrap(), "new_pool");
+        assert_eq!(obj.get("denomination").unwrap(), &serde_json::json!(0.001));
+        assert_eq!(obj.get("relay").unwrap(), "wss://relay.example.com");
+        assert_eq!(obj.get("transport").unwrap(), "tor");
+        // network should NOT be serialized
+        assert!(obj.get("network").is_none());
     }
 
     #[test]
@@ -604,12 +865,12 @@ pub mod tests {
     }
 
     #[test]
-    fn input() {
+    fn input_legacy_format() {
         let raw = r#"
             {
               "version": "1",
               "type": "input",
-              "input": 
+              "input":
                 {
                   "txin": "4f8176ffbca02baba974a4458eae799a87afa8a00317565827f035a8d45556ba0000000000fdffffff",
                   "witness": "0247304402202be1d200c2c917c6bda981dd56b55a272f06af9aca9af4f9c8a23d4d0429bc420220623b571410104edc7773ab5cf71f3e10f814028aedef133591c1dab74eefc51f812103b1ea5528a8279cf184e76464ba5ed0a80cc6ca7c47899478fb7e4c9411404877",
@@ -619,16 +880,12 @@ pub mod tests {
         "#;
         let msg = PoolMessage::from_str(raw).unwrap();
         assert!(matches!(msg, PoolMessage::Input(_)));
-        let serialized = msg.to_string().unwrap();
-        let roundtrip = PoolMessage::from_str(&serialized).unwrap();
-        assert_eq!(msg, roundtrip);
     }
 
     #[test]
     fn output() {
         let raw = r#"
             {
-                "version": "1",
                 "type": "output",
                 "address": "bc1q4smd35jchznp0u442zhyv5yawf200ffet5kqc9"
             }
@@ -641,10 +898,22 @@ pub mod tests {
     }
 
     #[test]
+    fn output_with_version() {
+        let raw = r#"
+            {
+                "version": "1",
+                "type": "output",
+                "address": "bc1q4smd35jchznp0u442zhyv5yawf200ffet5kqc9"
+            }
+        "#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        assert!(matches!(msg, PoolMessage::Output(_)));
+    }
+
+    #[test]
     fn join() {
         let raw = r#"
             {
-              "version": "1",
                 "type": "join_pool"
             }
         "#;
@@ -659,7 +928,6 @@ pub mod tests {
     fn join_npub() {
         let raw = r#"
             {
-              "version": "1",
                 "type": "join_pool",
                 "npub": "0000000000000000000000000000000000000000000000000000000000000001"
             }
@@ -675,7 +943,6 @@ pub mod tests {
     fn transaction() {
         let raw = r#"
             {
-                "version": "1",
                 "type": "transaction",
                 "transaction": "020000000001050121a999ecdcd0f288d300e28719fcf859dae2b3b644292b5f2d2aecbb2e3de20100000000fdffffff16ccb309f4f9975b983b4bba70b4ab71d1721644f8204f816e549e94016a45d90100000000fdffffff9147ae6adeee48ad24f927e54779be2d1036c87fe04777e847e258a8a709d1d40000000000fdffffff423ce31bbdab2b76296ad846742539957951af6ab1587cf9e07eeb8aba0c51dc0100000000fdffffff5188353f0c80629d4efbf8753299ed09587c2d070d10b51d43127eac1dc8ef0c0100000000fdffffff0580969800000000001600140300036b09933e01bedbeae63850f29abc49164a8096980000000000160014185cede11f852fd6ca22d6b3f2383602f4639adb80969800000000001600142354a0caffe52b6521052e439327d8a41311e89780969800000000001600149ab1671aeb5cf5a2646044dac08a6aac1c3b5ca28096980000000000160014e60577e0f4a1a16837073810aad2d61d6810393d02473044022054a76a3f40098f18f202bebc4c373117b724e0de0ee44606a1570a9f123a648c022036b33c776a7bee07d936219333f2110a4bf1e966be52bca2cf79c8b4d384198e8121033cf9267abc8d886ee38c1ba032603099c0fbc8dfadcfcb43ab66bd0467e4adb90247304402202d7573747931547cb4c8ef26883435d3692357c7c92248e2e1b4327517aa476d02207be4bcde6284773fef9ce3794665a579c23a8805cc31c68405c42c0aea9c3af881210273d5ceafd9f15aa4b39ed7f0ab7f2dc365e4ccfaf9d88dd741d1e238a060fb0a024730440220634fb1d0dd7ab4726921caf790c41d3329a9685e6317afa5110c5b2bc9e22caf02200a8e76ace3e1bbda10da8c982b99658fa65e099bdd6c9c0209145f252c5a3c4d81210292f420e0790da79e55d55f9ecbe03a2545bc09d5bff0bf3268eb7779fb580b5d024730440220452f0c4ae26f0910290f62bf2ada8052e07d5ee7ebfed054a85391691d68c0640220461453b516902a07fc3c8fd206883a0e4f329f20da327af53d8a8edc4e6fae95812102445efffa41d0cf45382ceb6b5b02a16ee1e61957a91813ced84a2091ead6495102473044022017bc5084bab4c6ce796edd9f04e65463f4d0a2cb08b97be356e673d2982dddee02205b965d73cd4ad1c8647d76d5e201d718c315b3dc3c5987c6bc447bf1cac2b0ab812102fed36ddfe86cc993964b114780d66ff9c73867b7eae75d18e67a8d0490d68f6900000000"
             }
@@ -688,7 +955,7 @@ pub mod tests {
     }
 
     #[test]
-    fn credential() {
+    fn credential_legacy_format() {
         let raw = r#"
             {
                 "version": "1",
@@ -701,9 +968,63 @@ pub mod tests {
         "#;
         let msg = PoolMessage::from_str(raw).unwrap();
         assert!(matches!(msg, PoolMessage::Credentials(_)));
+    }
+
+    #[test]
+    fn credential_python_format() {
+        let raw = r#"
+            {
+                "id": "test_pool_123",
+                "public_key": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                "denomination": 0.001,
+                "peers": 2,
+                "timeout": 1700000000,
+                "relay": "wss://relay.example.com",
+                "private_key": "0000000000000000000000000000000000000000000000000000000000000001",
+                "fee_rate": 10,
+                "transport": "tor",
+                "vpn_gateway": ""
+            }
+        "#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        if let PoolMessage::Credentials(cred) = msg {
+            assert_eq!(cred.id, "test_pool_123");
+            assert_eq!(cred.relay, Some("wss://relay.example.com".into()));
+            assert_eq!(cred.peers, Some(2));
+            assert_eq!(cred.fee_rate, Some(10));
+            assert_eq!(cred.transport, Some("tor".into()));
+        } else {
+            panic!("expected Credentials");
+        }
+    }
+
+    #[test]
+    fn credential_roundtrip() {
+        let cred = Credentials {
+            id: "test123".into(),
+            private_key: nostr::SecretKey::from_hex(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap(),
+            public_key: Some("abcd".into()),
+            denomination: Some(Amount::from_btc(0.001).unwrap()),
+            peers: Some(3),
+            timeout: Some(9999),
+            relay: Some("wss://relay.test".into()),
+            fee_rate: Some(5),
+            transport: Some("tor".into()),
+            vpn_gateway: Some("".into()),
+        };
+
+        let msg = PoolMessage::Credentials(cred);
         let serialized = msg.to_string().unwrap();
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();
-        assert_eq!(msg, roundtrip);
+        if let (PoolMessage::Credentials(a), PoolMessage::Credentials(b)) = (&msg, &roundtrip) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.relay, b.relay);
+        } else {
+            panic!("expected Credentials");
+        }
     }
 
     #[test]

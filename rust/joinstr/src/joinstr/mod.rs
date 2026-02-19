@@ -458,7 +458,7 @@ impl Joinstr<'_> {
         let mut connected = false;
         while now() < timeout {
             let mut inner = self.inner.lock().expect("poisoned");
-            if let Some(PoolMessage::Credentials(Credentials { id, key })) =
+            if let Some(PoolMessage::Credentials(Credentials { id, private_key, .. })) =
                 inner.client.try_receive_pool_msg()?
             {
                 log::debug!(
@@ -467,7 +467,7 @@ impl Joinstr<'_> {
                 );
                 if id == inner.pool_as_ref()?.id {
                     // we create a new nostr client using pool keys and replace the actual one
-                    let keys = Keys::new(key);
+                    let keys = Keys::new(private_key);
                     let fg = &inner.client.name;
                     let name = format!("prev_{fg}");
                     let mut new_client = NostrClient::new(&name)
@@ -552,9 +552,33 @@ impl Joinstr<'_> {
                     (PoolMessage::Join(Some(npub)), send_response) => {
                         if !peers.contains(&npub) {
                             if send_response {
+                                let pool_ref = inner.pool_as_ref()?;
+                                let payload = inner.payload_as_ref().ok();
                                 let response = PoolMessage::Credentials(Credentials {
-                                    id: inner.pool_as_ref()?.id.clone(),
-                                    key: inner.client.get_keys()?.secret_key().clone(),
+                                    id: pool_ref.id.clone(),
+                                    private_key: inner.client.get_keys()?.secret_key().clone(),
+                                    public_key: Some(pool_ref.public_key.to_string()),
+                                    denomination: payload.map(|p| p.denomination),
+                                    peers: payload.map(|p| p.peers),
+                                    timeout: payload.and_then(|p| match p.timeout {
+                                        Timeline::Simple(t) => Some(t),
+                                        _ => None,
+                                    }),
+                                    relay: payload.map(|p| p.relay.clone()),
+                                    fee_rate: payload.and_then(|p| match &p.fee {
+                                        Fee::Fixed(f) => Some(*f),
+                                        _ => None,
+                                    }),
+                                    transport: payload.map(|p| {
+                                        if p.transport.tor.as_ref().map_or(false, |t| t.enable) {
+                                            "tor".into()
+                                        } else if p.transport.vpn.as_ref().map_or(false, |v| v.enable) {
+                                            "vpn".into()
+                                        } else {
+                                            String::new()
+                                        }
+                                    }),
+                                    vpn_gateway: payload.and_then(|p| p.vpn_gateway.clone()),
                                 });
                                 inner.client.send_pool_message(&npub, response)?;
                             }
@@ -1249,9 +1273,10 @@ impl<'a> JoinstrInner<'a> {
             denomination: self.denomination.ok_or(Error::DenominationMissing)?,
             peers: self.peers_count.ok_or(Error::PeerMissing)?,
             timeout: self.timeout.ok_or(Error::TimeoutMissing)?,
-            relays: self.relay.clone().map(|r| vec![r]).unwrap_or_default(),
+            relay: self.relay.clone().unwrap_or_default(),
             fee: self.fee.clone().ok_or(Error::FeeMissing)?,
             transport,
+            vpn_gateway: None,
         };
         let mut engine = sha256::Hash::engine();
         engine.input(&public_key.clone().to_bytes());
@@ -1265,7 +1290,7 @@ impl<'a> JoinstrInner<'a> {
         let id = sha256::Hash::from_engine(engine).to_string();
 
         let pool = Pool {
-            versions: default_version(),
+            version: default_version(),
             id,
             pool_type: PoolType::Create,
             public_key,
