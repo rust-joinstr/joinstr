@@ -1431,6 +1431,8 @@ impl<'a> JoinstrInner<'a> {
         S: JoinstrSigner,
         N: Fn(),
     {
+        use miniscript::bitcoin::{Psbt, Transaction, TxIn};
+
         let name = self.client.name.clone();
         log::debug!("Joinstr::register_input({name})");
         let unsigned = match self.coinjoin_as_ref()?.unsigned_tx() {
@@ -1440,18 +1442,43 @@ impl<'a> JoinstrInner<'a> {
         if let Some(input) = self.input.take() {
             log::debug!("Joinstr::register_input({name}) signing input ...");
             let signed_input = signer
-                .sign_input(&unsigned, input)
+                .sign_input(&unsigned, input.clone())
                 .map_err(Error::SigningFail)?;
             log::debug!("Joinstr::register_input({name}) input signed!");
-            let msg = PoolMessage::Input(signed_input.clone());
+
+            // Build a full PSBT (1 input + all outputs) for Python compatibility
+            let mut tx = unsigned.clone();
+            tx.input.push(signed_input.txin.clone());
+
+            let mut psbt = Psbt::from_unsigned_tx(Transaction {
+                version: tx.version,
+                lock_time: tx.lock_time,
+                input: vec![TxIn {
+                    previous_output: signed_input.txin.previous_output,
+                    sequence: signed_input.txin.sequence,
+                    ..Default::default()
+                }],
+                output: tx.output,
+            })
+            .map_err(|_| Error::Coinjoin(crate::coinjoin::Error::TxToPsbt))?;
+
+            // Add witness data and UTXO info to the PSBT input
+            use miniscript::bitcoin::psbt;
+            psbt.inputs[0] = psbt::Input {
+                witness_utxo: Some(input.txout.clone()),
+                sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)),
+                final_script_witness: Some(signed_input.txin.witness.clone()),
+                ..Default::default()
+            };
+
+            let msg = PoolMessage::Psbt(psbt);
             self.pool_exists()?;
             let npub = self.pool_as_ref()?.public_key;
-            log::debug!("Joinstr::register_input({name}) sending signed input to pool..");
+            log::debug!("Joinstr::register_input({name}) sending signed PSBT to pool..");
             self.client.send_pool_message(&npub, msg)?;
             self.inputs.push(signed_input);
             notif();
             log::debug!("Joinstr::register_input({name}) input sent & locally registered!");
-            // TODO: handle re-send if fails
             Ok(())
         } else {
             Err(Error::InputMissing)

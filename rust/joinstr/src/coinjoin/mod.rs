@@ -164,10 +164,12 @@ where
         }
 
         // process outputs
+        // Python: output_amount = denomination_sats - int(fee_rate * 100)
+        let output_amount = self.denomination - Amount::from_sat(self.fee as u64 * 100);
         let mut output: Vec<_> = addresses
             .iter()
             .map(|a| TxOut {
-                value: self.denomination,
+                value: output_amount,
                 script_pubkey: a.script_pubkey(),
             })
             .collect();
@@ -206,6 +208,19 @@ where
         for i in self.inputs.as_slice() {
             if i.txin.previous_output == input.txin.previous_output {
                 return Err(Error::DoubleSpend);
+            }
+        }
+
+        // Python: denomination + 500 <= input_value <= denomination + 5000
+        if let Some(input_value) = input.amount {
+            let min = self.denomination + Amount::from_sat(500);
+            let max = self.denomination + Amount::from_sat(5000);
+            if input_value < min || input_value > max {
+                return Err(Error::InputValueOutOfRange(
+                    input_value.to_sat(),
+                    min.to_sat(),
+                    max.to_sat(),
+                ));
             }
         }
 
@@ -307,6 +322,18 @@ where
             }
 
             let fee = inp_amount - out_amount;
+
+            // Python: N * 100 <= fee <= N * 10000 (N = number of participants)
+            let n = self.inputs.len() as u64;
+            let min_fee = Amount::from_sat(n * 100);
+            let max_fee = Amount::from_sat(n * 10000);
+            if fee < min_fee || fee > max_fee {
+                return Err(Error::FeeBoundsViolation(
+                    fee.to_sat(),
+                    min_fee.to_sat(),
+                    max_fee.to_sat(),
+                ));
+            }
 
             // sort lexically
             self.inputs.sort_by(|a, b| {
