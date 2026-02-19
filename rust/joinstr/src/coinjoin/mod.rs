@@ -163,9 +163,16 @@ where
             }
         }
 
-        // process outputs
         // Python: output_amount = denomination_sats - int(fee_rate * 100)
-        let output_amount = self.denomination - Amount::from_sat(self.fee as u64 * 100);
+        let fee_deduction = Amount::from_sat(self.fee as u64 * 100);
+        let output_amount =
+            self.denomination
+                .checked_sub(fee_deduction)
+                .ok_or(Error::FeeBoundsViolation(
+                    fee_deduction.to_sat(),
+                    0,
+                    self.denomination.to_sat(),
+                ))?;
         let mut output: Vec<_> = addresses
             .iter()
             .map(|a| TxOut {
