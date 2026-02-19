@@ -674,8 +674,10 @@ impl PoolMessage {
         let mut map = Map::new();
         match self {
             PoolMessage::Psbt(psbt) => {
-                map.insert("type".into(), "psbt".into());
-                map.insert("psbt".into(), serde_json::to_value(psbt)?);
+                map.insert("type".into(), "input".into());
+                let psbt_bytes = psbt.serialize();
+                let psbt_b64 = base64ct::Base64::encode_string(&psbt_bytes);
+                map.insert("psbt".into(), Value::String(psbt_b64));
             }
             PoolMessage::Transaction(tx) => {
                 map.insert("type".into(), "transaction".into());
