@@ -53,15 +53,22 @@ impl TryFrom<Psbt> for InputDataSigned {
         }
 
         let mut txin = value.unsigned_tx.input[0].to_owned();
+        let psbt_input = &value.inputs[0];
 
         if txin.witness.is_empty() {
-            if let Some(witness) = &value.inputs[0].final_script_witness {
+            if let Some(witness) = &psbt_input.final_script_witness {
                 txin.witness = witness.clone();
+            } else if !psbt_input.partial_sigs.is_empty() {
+                let (pubkey, sig) = psbt_input.partial_sigs.iter().next().unwrap();
+                let mut witness = miniscript::bitcoin::Witness::new();
+                witness.push(sig.serialize());
+                witness.push(pubkey.to_bytes());
+                txin.witness = witness;
             } else {
                 return Err(Error::WitnessMissing);
             }
         }
-        let amount = value.inputs[0].witness_utxo.as_ref().map(|utxo| utxo.value);
+        let amount = psbt_input.witness_utxo.as_ref().map(|utxo| utxo.value);
         Ok(InputDataSigned { txin, amount })
     }
 }
@@ -118,6 +125,8 @@ mod serde_relay {
                 if arr.is_empty() {
                     return Ok(String::new());
                 }
+                // Leniently picks the first string entry; non-string elements
+                // are ignored to tolerate mixed-type arrays from other implementations.
                 let first = arr.into_iter().find_map(|v| {
                     if let serde_json::Value::String(s) = v {
                         Some(s)
@@ -213,6 +222,7 @@ pub struct Pool {
     pub network: Network,
     #[serde(rename = "type")]
     pub pool_type: PoolType,
+    #[serde(alias = "publicKey")]
     pub public_key: nostr::PublicKey,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(flatten)]
@@ -240,7 +250,7 @@ impl Pool {
             denomination: bitcoin::Amount::from_sat(denomination),
             peers,
             timeout: Timeline::Simple(timeout),
-            relay: relay,
+            relay,
             fee: Fee::Fixed(fee),
             transport: default_transport(),
             vpn_gateway: None,
@@ -297,7 +307,7 @@ impl TryFrom<Event> for Pool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PoolType {
-    #[serde(rename = "new_pool")]
+    #[serde(rename = "new_pool", alias = "create")]
     Create,
     #[serde(rename = "update")]
     Update,
@@ -313,12 +323,13 @@ pub struct PoolPayload {
     pub timeout: Timeline,
     #[serde(with = "serde_relay", alias = "relays")]
     pub relay: String,
-    #[serde(rename = "fee_rate")]
+    #[serde(rename = "fee_rate", alias = "feeRate")]
     pub fee: Fee,
     #[serde(with = "serde_transport")]
     pub transport: Transport,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "vpnGateway")]
     pub vpn_gateway: Option<String>,
 }
 
@@ -389,11 +400,12 @@ pub enum PoolMessage {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Credentials {
     pub id: String,
-    #[serde(alias = "key")]
+    #[serde(alias = "key", alias = "privateKey")]
     #[serde(serialize_with = "serialize_key")]
     pub private_key: nostr::SecretKey,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "publicKey")]
     pub public_key: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -410,12 +422,14 @@ pub struct Credentials {
     pub relay: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "feeRate")]
     pub fee_rate: Option<u32>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "vpnGateway")]
     pub vpn_gateway: Option<String>,
 }
 
@@ -512,8 +526,8 @@ impl FromStr for PoolMessage {
                         if let Some(Value::String(psbt_b64)) = map.get("psbt") {
                             let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64)
                                 .map_err(|_| ParsingError::Base64)?;
-                            let psbt = Psbt::deserialize(&psbt_bytes)
-                                .map_err(|_| ParsingError::Psbt)?;
+                            let psbt =
+                                Psbt::deserialize(&psbt_bytes).map_err(|_| ParsingError::Psbt)?;
                             Ok(Self::Psbt(psbt))
                         } else {
                             Err(ParsingError::Psbt)
@@ -521,7 +535,12 @@ impl FromStr for PoolMessage {
                     }
                     "input" => {
                         // Python sends {"psbt": "<base64>", "type": "input"}
-                        if let Some(Value::String(psbt_b64)) = map.get("psbt") {
+                        // Some implementations use "hex" instead of "psbt"
+                        let psbt_field = map
+                            .get("psbt")
+                            .or_else(|| map.get("hex"))
+                            .and_then(|v| v.as_str());
+                        if let Some(psbt_b64) = psbt_field {
                             let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64)
                                 .map_err(|_| ParsingError::Base64)?;
                             let psbt: Psbt =
@@ -530,11 +549,21 @@ impl FromStr for PoolMessage {
                                 psbt.try_into().map_err(|_| ParsingError::Input)?;
                             Ok(Self::Input(input))
                         } else if let Some(m) = map.get("input") {
-                            // Legacy Rust format
                             let input = InputDataSigned::from_value(m.clone())?;
                             Ok(Self::Input(input))
                         } else {
                             Err(ParsingError::Input)
+                        }
+                    }
+                    "inputs" => {
+                        if let Some(Value::Array(arr)) = map.get("inputs") {
+                            if arr.len() != 1 {
+                                return Err(ParsingError::Inputs);
+                            }
+                            let input = InputDataSigned::from_value(arr[0].clone())?;
+                            Ok(Self::Input(input))
+                        } else {
+                            Err(ParsingError::Inputs)
                         }
                     }
                     "output" => {
@@ -544,6 +573,23 @@ impl FromStr for PoolMessage {
                             Ok(Self::Output(addr))
                         } else {
                             Err(ParsingError::Output)
+                        }
+                    }
+                    "outputs" => {
+                        if let Some(Value::Array(arr)) = map.get("outputs") {
+                            if arr.len() != 1 {
+                                return Err(ParsingError::Outputs);
+                            }
+                            if let Some(addr_str) = arr[0].as_str() {
+                                let addr: miniscript::bitcoin::Address<NetworkUnchecked> =
+                                    Address::from_str(addr_str)
+                                        .map_err(|_| ParsingError::Output)?;
+                                Ok(Self::Output(addr))
+                            } else {
+                                Err(ParsingError::Output)
+                            }
+                        } else {
+                            Err(ParsingError::Outputs)
                         }
                     }
                     "transaction" => {
@@ -580,9 +626,9 @@ impl FromStr for PoolMessage {
                 };
             }
 
-            // Python credentials have no "type" field — they send the full pool info
-            // with a "private_key" field directly
-            if map.contains_key("private_key") && map.contains_key("id") {
+            if (map.contains_key("private_key") || map.contains_key("privateKey"))
+                && map.contains_key("id")
+            {
                 let cred: Credentials = serde_json::from_value(Value::Object(map))?;
                 return Ok(Self::Credentials(cred));
             }
@@ -1062,8 +1108,7 @@ pub mod tests {
         let serialized = msg.to_string().unwrap();
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();
         if let (PoolMessage::Credentials(a), PoolMessage::Credentials(b)) = (&msg, &roundtrip) {
-            assert_eq!(a.id, b.id);
-            assert_eq!(a.relay, b.relay);
+            assert_eq!(a, b);
         } else {
             panic!("expected Credentials");
         }
@@ -1101,9 +1146,10 @@ pub mod tests {
 
         let input = InputDataSigned {
             txin: TxIn {
-                previous_output: "0000000000000000000000000000000000000000000000000000000000000001:0"
-                    .parse()
-                    .unwrap(),
+                previous_output:
+                    "0000000000000000000000000000000000000000000000000000000000000001:0"
+                        .parse()
+                        .unwrap(),
                 sequence: miniscript::bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
                 witness: miniscript::bitcoin::Witness::new(),
                 ..Default::default()
@@ -1120,5 +1166,162 @@ pub mod tests {
             roundtripped.txin.previous_output,
             input.txin.previous_output
         );
+    }
+
+    #[test]
+    fn psbt_serializes_as_input_and_deserializes_to_input() {
+        // PoolMessage::Psbt serializes with "type":"input" and a "psbt" base64 field,
+        // but deserializes back as PoolMessage::Input(InputDataSigned) because the
+        // "input" type handler extracts the signed input from the PSBT. This asymmetry
+        // is intentional: callers construct PoolMessage::Psbt to send over the wire,
+        // but receivers always get PoolMessage::Input after parsing.
+        let psbt_b64 = "cHNidP8BAHEBAAAAATCOqpCuU8eoeQsSsEYb/n6FBozrlytjjDIR+W1Hn6M4AQAAAAD/////AhS96wsAAAAAFgAUQJxQ/6Eg9bri4/Exvn+r1A+IeyAUvesLAAAAABYAFOKsiuNywQeZ9EKlQS3yiGHMzfoIAAAAAAABAJoBAAAAAqBOLjCwhAdjtE7N/F2075driKWW27JFdFzWDe/DiqN3AAAAAAD/////2WadwSyHIg42zrc1vG7raPqMxs/jIu2cfnCPC3LZDDsAAAAAAP////8C3L3rCwAAAAAWABT5hnV0YVQn7PKvwXKQ4UtCTTt6H9y96wsAAAAAFgAUWaR6myJN4T1ti9u/yXNJlcn56vIAAAAAAQEf3L3rCwAAAAAWABRZpHqbIk3hPW2L27/Jc0mVyfnq8iICAzRmCdPhKH7oBWrhiYZkP60MQajbsP8dhTnFHpkr75HORzBEAiAg165L5FwWmE/MLz6fQ+eGNF1GDc3aGx/4TtUBPZkH/AIgRG2zZM8I7rdpJemQUHpuHht3AbNiAAWN1gouECRylbiBAQMEgQAAAAAAAA==";
+        let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64).unwrap();
+        let psbt = Psbt::deserialize(&psbt_bytes).unwrap();
+
+        let expected_input: InputDataSigned = psbt.clone().try_into().unwrap();
+        let msg = PoolMessage::Psbt(psbt);
+
+        let json = msg.to_json().unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.get("type").unwrap(), "input");
+        assert!(obj.get("psbt").unwrap().is_string());
+
+        let serialized = msg.to_string().unwrap();
+        let roundtrip = PoolMessage::from_str(&serialized).unwrap();
+        if let PoolMessage::Input(input) = roundtrip {
+            assert_eq!(
+                input.txin.previous_output,
+                expected_input.txin.previous_output
+            );
+            assert_eq!(input.amount, expected_input.amount);
+            assert!(!input.txin.witness.is_empty());
+        } else {
+            panic!(
+                "expected PoolMessage::Input after roundtrip, got {:?}",
+                roundtrip
+            );
+        }
+    }
+
+    #[test]
+    fn pool_camel_case_format() {
+        let raw = r#"{"type":"new_pool","id":"fdlrvsgmqd1730582572","publicKey":"312929d99a20b93e2f44281d1110e2a051051b1968e856a3362171a076e4a471","denomination":1.9999894,"peers":2,"timeout":1730583172,"relay":"wss://nostr.fmt.wiz.biz","feeRate":1,"transport":"VPN","vpnGateway":"vpn04-ams.riseup.net"}"#;
+        let pool: Pool = serde_json::from_str(raw).unwrap();
+        assert_eq!(pool.pool_type, PoolType::Create);
+        assert_eq!(pool.id, "fdlrvsgmqd1730582572");
+        let payload = pool.payload.as_ref().unwrap();
+        assert_eq!(payload.fee, Fee::Fixed(1));
+        assert_eq!(payload.vpn_gateway, Some("vpn04-ams.riseup.net".into()));
+    }
+
+    #[test]
+    fn pool_versioned_format() {
+        let raw = r#"{
+            "version": "1",
+            "id": "e37076afaf4a0054fd144f0b843c174173e7d0620a572572c0a34e6b78023afe",
+            "network": "regtest",
+            "type": "create",
+            "public_key": "8f09f051d2a699bfd9fc289b7edb49cda50768067181df23735f3e921955001b",
+            "denomination": 1000000,
+            "peers": 2,
+            "timeout": 1731808735,
+            "relays": ["ws://127.0.0.1:34889"],
+            "fee_rate": 10,
+            "transport": {
+                "vpn": { "enable": false },
+                "tor": { "enable": false }
+            }
+        }"#;
+        let pool: Pool = serde_json::from_str(raw).unwrap();
+        assert_eq!(pool.pool_type, PoolType::Create);
+        assert_eq!(pool.version, Some("1".into()));
+        let payload = pool.payload.as_ref().unwrap();
+        assert_eq!(payload.denomination, Amount::from_sat(1000000));
+        assert_eq!(payload.peers, 2);
+        assert_eq!(payload.relay, "ws://127.0.0.1:34889");
+        assert_eq!(payload.fee, Fee::Fixed(10));
+    }
+
+    #[test]
+    fn credential_camel_case_format() {
+        let raw = r#"{"id":"fdlrvsgmqd1730582572","publicKey":"312929d99a20b93e2f44281d1110e2a051051b1968e856a3362171a076e4a471","denomination":1.9999894,"peers":2,"timeout":1730583172,"relay":"wss://nostr.fmt.wiz.biz","privateKey":"2d9b289395139525983ddaf95862529bd3cb5fe5107c5d8db3159de8993f62a2","feeRate":1,"transport":"VPN","vpnGateway":"vpn04-ams.riseup.net"}"#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        if let PoolMessage::Credentials(cred) = msg {
+            assert_eq!(cred.id, "fdlrvsgmqd1730582572");
+            assert_eq!(
+                cred.public_key,
+                Some("312929d99a20b93e2f44281d1110e2a051051b1968e856a3362171a076e4a471".into())
+            );
+            assert_eq!(cred.fee_rate, Some(1));
+            assert_eq!(cred.vpn_gateway, Some("vpn04-ams.riseup.net".into()));
+        } else {
+            panic!("expected Credentials, got {:?}", msg);
+        }
+    }
+
+    #[test]
+    fn credential_versioned_format() {
+        let raw = r#"{
+            "version": "1",
+            "type": "credentials",
+            "credentials": {
+                "id": "e37076afaf4a0054fd144f0b843c174173e7d0620a572572c0a34e6b78023afe",
+                "key": "a0013422636dc37072dac80f0cdd6e3e15f54dc3a449dd62c383e9ed9487e402"
+            }
+        }"#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        if let PoolMessage::Credentials(cred) = msg {
+            assert_eq!(
+                cred.id,
+                "e37076afaf4a0054fd144f0b843c174173e7d0620a572572c0a34e6b78023afe"
+            );
+        } else {
+            panic!("expected Credentials, got {:?}", msg);
+        }
+    }
+
+    #[test]
+    fn output_versioned_format() {
+        let raw = r#"{
+            "version": "1",
+            "type": "outputs",
+            "outputs": ["bcrt1qe4c2u4hujydlk2dftde82rh72yhkvsxrec7j8p"]
+        }"#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        assert!(matches!(msg, PoolMessage::Output(_)));
+    }
+
+    #[test]
+    fn input_versioned_format() {
+        let raw = r#"{
+            "version": "1",
+            "type": "inputs",
+            "inputs": [{
+                "txin": "91cfa09cbfa0d5f2a78bccf9348aa7f6e760afaf2ff16f45dcedb7038ddfdb240100000000fdffffff",
+                "witness": "0247304402206c6494b8fc9932384f64377f741b2fc7389e4238a0520d045263434351a5955c0220164d8904368a0745bc1106d9b17a1abf45390850bb473e5b1b0d4487ce102a6a812103e20092911874cd94b8969c08458a7eadf291b4e51f850f86c5b1b22edcf17353",
+                "amount": 1100000
+            }]
+        }"#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        if let PoolMessage::Input(input) = msg {
+            assert_eq!(input.amount, Some(Amount::from_sat(1100000)));
+        } else {
+            panic!("expected Input, got {:?}", msg);
+        }
+    }
+
+    #[test]
+    fn input_hex_field() {
+        let raw = r#"{"hex":"cHNidP8BAHEBAAAAATCOqpCuU8eoeQsSsEYb/n6FBozrlytjjDIR+W1Hn6M4AQAAAAD/////AhS96wsAAAAAFgAUQJxQ/6Eg9bri4/Exvn+r1A+IeyAUvesLAAAAABYAFOKsiuNywQeZ9EKlQS3yiGHMzfoIAAAAAAABAJoBAAAAAqBOLjCwhAdjtE7N/F2075driKWW27JFdFzWDe/DiqN3AAAAAAD/////2WadwSyHIg42zrc1vG7raPqMxs/jIu2cfnCPC3LZDDsAAAAAAP////8C3L3rCwAAAAAWABT5hnV0YVQn7PKvwXKQ4UtCTTt6H9y96wsAAAAAFgAUWaR6myJN4T1ti9u/yXNJlcn56vIAAAAAAQEf3L3rCwAAAAAWABRZpHqbIk3hPW2L27/Jc0mVyfnq8iICAzRmCdPhKH7oBWrhiYZkP60MQajbsP8dhTnFHpkr75HORzBEAiAg165L5FwWmE/MLz6fQ+eGNF1GDc3aGx/4TtUBPZkH/AIgRG2zZM8I7rdpJemQUHpuHht3AbNiAAWN1gouECRylbiBAQMEgQAAAAAAAA==","type":"input"}"#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        assert!(matches!(msg, PoolMessage::Input(_)));
+    }
+
+    #[test]
+    fn output_with_hex_null() {
+        let raw = r#"{"address":"tb1qu2kg4cmjcyrenazz54qjmu5gv8xvm7sgn0frw8","hex":null,"type":"output"}"#;
+        let msg = PoolMessage::from_str(raw).unwrap();
+        assert!(matches!(msg, PoolMessage::Output(_)));
     }
 }
