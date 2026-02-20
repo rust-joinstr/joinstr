@@ -1455,18 +1455,15 @@ impl<'a> JoinstrInner<'a> {
             log::debug!("Joinstr::register_input({name}) input signed!");
 
             // Build a full PSBT (1 input + all outputs) for Python compatibility
-            let mut tx = unsigned.clone();
-            tx.input.push(signed_input.txin.clone());
-
             let mut psbt = Psbt::from_unsigned_tx(Transaction {
-                version: tx.version,
-                lock_time: tx.lock_time,
+                version: unsigned.version,
+                lock_time: unsigned.lock_time,
                 input: vec![TxIn {
                     previous_output: signed_input.txin.previous_output,
                     sequence: signed_input.txin.sequence,
                     ..Default::default()
                 }],
-                output: tx.output,
+                output: unsigned.output.clone(),
             })
             .map_err(|_| Error::Coinjoin(crate::coinjoin::Error::TxToPsbt))?;
 

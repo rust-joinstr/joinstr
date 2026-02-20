@@ -509,8 +509,11 @@ impl FromStr for PoolMessage {
             if let Some(Value::String(t)) = map.get("type") {
                 return match t.as_str() {
                     "psbt" => {
-                        if let Some(Value::String(psbt)) = map.get("psbt") {
-                            let psbt: Psbt = serde_json::from_str(psbt)?;
+                        if let Some(Value::String(psbt_b64)) = map.get("psbt") {
+                            let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64)
+                                .map_err(|_| ParsingError::Base64)?;
+                            let psbt = Psbt::deserialize(&psbt_bytes)
+                                .map_err(|_| ParsingError::Psbt)?;
                             Ok(Self::Psbt(psbt))
                         } else {
                             Err(ParsingError::Psbt)
@@ -654,10 +657,10 @@ impl InputDataSigned {
             };
             txin.witness = witness;
 
-            let amount = map
-                .get("amount")
-                .ok_or(ParsingError::MissingKey("amount".into()))?;
-            let amount: Option<Amount> = Some(serde_json::from_value(amount.clone())?);
+            let amount: Option<Amount> = match map.get("amount") {
+                Some(Value::Null) | None => None,
+                Some(v) => Some(serde_json::from_value(v.clone())?),
+            };
             Ok(Self { txin, amount })
         } else {
             Err(ParsingError::NotAnObject)
@@ -1090,5 +1093,32 @@ pub mod tests {
         let s = output.to_string().unwrap();
         assert!(s.contains(r#""type": "output""#), "output: {s}");
         assert!(s.contains(r#""address": "#), "output addr: {s}");
+    }
+
+    #[test]
+    fn input_data_signed_roundtrip_missing_amount() {
+        use miniscript::bitcoin::TxIn;
+
+        let input = InputDataSigned {
+            txin: TxIn {
+                previous_output: "0000000000000000000000000000000000000000000000000000000000000001:0"
+                    .parse()
+                    .unwrap(),
+                sequence: miniscript::bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: miniscript::bitcoin::Witness::new(),
+                ..Default::default()
+            },
+            amount: None,
+        };
+
+        let json = input.to_json();
+        assert!(json.get("amount").is_none());
+
+        let roundtripped = InputDataSigned::from_value(json).unwrap();
+        assert_eq!(roundtripped.amount, None);
+        assert_eq!(
+            roundtripped.txin.previous_output,
+            input.txin.previous_output
+        );
     }
 }
