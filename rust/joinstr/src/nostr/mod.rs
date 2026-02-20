@@ -166,7 +166,7 @@ mod serde_transport {
     {
         let value = serde_json::Value::deserialize(deserializer)?;
         match value {
-            serde_json::Value::String(s) => match s.as_str() {
+            serde_json::Value::String(s) => match s.to_ascii_lowercase().as_str() {
                 "tor" => Ok(Transport {
                     vpn: Some(Vpn {
                         enable: false,
@@ -1213,6 +1213,7 @@ pub mod tests {
         let payload = pool.payload.as_ref().unwrap();
         assert_eq!(payload.fee, Fee::Fixed(1));
         assert_eq!(payload.vpn_gateway, Some("vpn04-ams.riseup.net".into()));
+        assert!(payload.transport.vpn.as_ref().unwrap().enable);
     }
 
     #[test]
