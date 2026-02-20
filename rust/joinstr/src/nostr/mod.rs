@@ -549,8 +549,18 @@ impl FromStr for PoolMessage {
                                 psbt.try_into().map_err(|_| ParsingError::Input)?;
                             Ok(Self::Input(input))
                         } else if let Some(m) = map.get("input") {
-                            let input = InputDataSigned::from_value(m.clone())?;
-                            Ok(Self::Input(input))
+                            if let Some(psbt_b64) = m.get("psbt").and_then(|v| v.as_str()) {
+                                let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64)
+                                    .map_err(|_| ParsingError::Base64)?;
+                                let psbt: Psbt = Psbt::deserialize(&psbt_bytes)
+                                    .map_err(|_| ParsingError::Psbt)?;
+                                let input: InputDataSigned =
+                                    psbt.try_into().map_err(|_| ParsingError::Input)?;
+                                Ok(Self::Input(input))
+                            } else {
+                                let input = InputDataSigned::from_value(m.clone())?;
+                                Ok(Self::Input(input))
+                            }
                         } else {
                             Err(ParsingError::Input)
                         }
@@ -759,12 +769,15 @@ fn to_python_json_string(value: &Value) -> Result<String, serde_json::Error> {
 impl PoolMessage {
     pub fn to_json(&self) -> Result<Value, SerializeError> {
         let mut map = Map::new();
+        map.insert("version".into(), "1".into());
         match self {
             PoolMessage::Psbt(psbt) => {
                 map.insert("type".into(), "input".into());
                 let psbt_bytes = psbt.serialize();
                 let psbt_b64 = base64ct::Base64::encode_string(&psbt_bytes);
-                map.insert("psbt".into(), Value::String(psbt_b64));
+                let mut input_obj = Map::new();
+                input_obj.insert("psbt".into(), Value::String(psbt_b64));
+                map.insert("input".into(), Value::Object(input_obj));
             }
             PoolMessage::Transaction(tx) => {
                 map.insert("type".into(), "transaction".into());
@@ -777,21 +790,20 @@ impl PoolMessage {
                     map.insert("npub".into(), serde_json::to_value(npub)?);
                 }
             }
-            PoolMessage::Input(_input) => {
-                // Python format: {"psbt": "<base64>", "type": "input"}
-                // We can't reconstruct a full PSBT from InputDataSigned alone,
-                // so we still send the legacy format for Input variant.
-                // Callers should use PoolMessage::Psbt for wire compat.
+            PoolMessage::Input(input) => {
                 map.insert("type".into(), "input".into());
-                map.insert("input".into(), _input.to_json());
+                map.insert("input".into(), input.to_json());
             }
             PoolMessage::Output(addr) => {
-                map.insert("type".into(), "output".into());
-                map.insert("address".into(), serde_json::to_value(addr)?);
+                map.insert("type".into(), "outputs".into());
+                map.insert(
+                    "outputs".into(),
+                    Value::Array(vec![serde_json::to_value(addr)?]),
+                );
             }
             PoolMessage::Credentials(cred) => {
-                // Python format: send full credentials at top level (no wrapper)
-                return Ok(serde_json::to_value(cred)?);
+                map.insert("type".into(), "credentials".into());
+                map.insert("credentials".into(), serde_json::to_value(cred)?);
             }
         }
         Ok(map.into())
@@ -981,6 +993,8 @@ pub mod tests {
         let msg = PoolMessage::from_str(raw).unwrap();
         assert!(matches!(msg, PoolMessage::Output(_)));
         let serialized = msg.to_string().unwrap();
+        assert!(serialized.contains(r#""type": "outputs""#), "{serialized}");
+        assert!(serialized.contains(r#""outputs": ["#), "{serialized}");
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();
         assert_eq!(msg, roundtrip);
     }
@@ -1008,6 +1022,7 @@ pub mod tests {
         let msg = PoolMessage::from_str(raw).unwrap();
         assert!(matches!(msg, PoolMessage::Join(None)));
         let serialized = msg.to_string().unwrap();
+        assert!(serialized.contains(r#""version": "1""#), "{serialized}");
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();
         assert_eq!(msg, roundtrip);
     }
@@ -1023,6 +1038,8 @@ pub mod tests {
         let msg = PoolMessage::from_str(raw).unwrap();
         assert!(matches!(msg, PoolMessage::Join(Some(_))));
         let serialized = msg.to_string().unwrap();
+        assert!(serialized.contains(r#""version": "1""#), "{serialized}");
+        assert!(serialized.contains(r#""npub""#), "{serialized}");
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();
         assert_eq!(msg, roundtrip);
     }
@@ -1129,15 +1146,15 @@ pub mod tests {
     fn python_json_compat() {
         let join = PoolMessage::Join(None);
         let s = join.to_string().unwrap();
+        assert!(s.contains(r#""version": "1""#), "join version: {s}");
         assert!(s.contains(r#""type": "join_pool""#), "join: {s}");
-        assert_eq!(s, r#"{"type": "join_pool"}"#);
 
         let output = PoolMessage::Output(
             Address::from_str("bc1q4smd35jchznp0u442zhyv5yawf200ffet5kqc9").unwrap(),
         );
         let s = output.to_string().unwrap();
-        assert!(s.contains(r#""type": "output""#), "output: {s}");
-        assert!(s.contains(r#""address": "#), "output addr: {s}");
+        assert!(s.contains(r#""type": "outputs""#), "output: {s}");
+        assert!(s.contains(r#""outputs": ["#), "output array: {s}");
     }
 
     #[test]
@@ -1170,11 +1187,6 @@ pub mod tests {
 
     #[test]
     fn psbt_serializes_as_input_and_deserializes_to_input() {
-        // PoolMessage::Psbt serializes with "type":"input" and a "psbt" base64 field,
-        // but deserializes back as PoolMessage::Input(InputDataSigned) because the
-        // "input" type handler extracts the signed input from the PSBT. This asymmetry
-        // is intentional: callers construct PoolMessage::Psbt to send over the wire,
-        // but receivers always get PoolMessage::Input after parsing.
         let psbt_b64 = "cHNidP8BAHEBAAAAATCOqpCuU8eoeQsSsEYb/n6FBozrlytjjDIR+W1Hn6M4AQAAAAD/////AhS96wsAAAAAFgAUQJxQ/6Eg9bri4/Exvn+r1A+IeyAUvesLAAAAABYAFOKsiuNywQeZ9EKlQS3yiGHMzfoIAAAAAAABAJoBAAAAAqBOLjCwhAdjtE7N/F2075driKWW27JFdFzWDe/DiqN3AAAAAAD/////2WadwSyHIg42zrc1vG7raPqMxs/jIu2cfnCPC3LZDDsAAAAAAP////8C3L3rCwAAAAAWABT5hnV0YVQn7PKvwXKQ4UtCTTt6H9y96wsAAAAAFgAUWaR6myJN4T1ti9u/yXNJlcn56vIAAAAAAQEf3L3rCwAAAAAWABRZpHqbIk3hPW2L27/Jc0mVyfnq8iICAzRmCdPhKH7oBWrhiYZkP60MQajbsP8dhTnFHpkr75HORzBEAiAg165L5FwWmE/MLz6fQ+eGNF1GDc3aGx/4TtUBPZkH/AIgRG2zZM8I7rdpJemQUHpuHht3AbNiAAWN1gouECRylbiBAQMEgQAAAAAAAA==";
         let psbt_bytes = base64ct::Base64::decode_vec(psbt_b64).unwrap();
         let psbt = Psbt::deserialize(&psbt_bytes).unwrap();
@@ -1184,8 +1196,14 @@ pub mod tests {
 
         let json = msg.to_json().unwrap();
         let obj = json.as_object().unwrap();
+        assert_eq!(obj.get("version").unwrap(), "1");
         assert_eq!(obj.get("type").unwrap(), "input");
-        assert!(obj.get("psbt").unwrap().is_string());
+        assert!(obj
+            .get("input")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("psbt"));
 
         let serialized = msg.to_string().unwrap();
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();

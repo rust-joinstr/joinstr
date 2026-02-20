@@ -1439,8 +1439,6 @@ impl<'a> JoinstrInner<'a> {
         S: JoinstrSigner,
         N: Fn(),
     {
-        use miniscript::bitcoin::{Psbt, Transaction, TxIn};
-
         let name = self.client.name.clone();
         log::debug!("Joinstr::register_input({name})");
         let unsigned = match self.coinjoin_as_ref()?.unsigned_tx() {
@@ -1454,7 +1452,8 @@ impl<'a> JoinstrInner<'a> {
                 .map_err(Error::SigningFail)?;
             log::debug!("Joinstr::register_input({name}) input signed!");
 
-            // Build a full PSBT (1 input + all outputs) for Python compatibility
+            use miniscript::bitcoin::{Psbt, Transaction, TxIn};
+
             let mut psbt = Psbt::from_unsigned_tx(Transaction {
                 version: unsigned.version,
                 lock_time: unsigned.lock_time,
@@ -1467,11 +1466,10 @@ impl<'a> JoinstrInner<'a> {
             })
             .map_err(|_| Error::Coinjoin(crate::coinjoin::Error::TxToPsbt))?;
 
-            // Add witness data and UTXO info to the PSBT input
             use miniscript::bitcoin::psbt;
             psbt.inputs[0] = psbt::Input {
                 witness_utxo: Some(input.txout.clone()),
-                sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)), // SIGHASH_ALL | SIGHASH_ANYONECANPAY
+                sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)),
                 final_script_witness: Some(signed_input.txin.witness.clone()),
                 ..Default::default()
             };
