@@ -444,12 +444,10 @@ impl Joinstr<'_> {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.pool_exists()?;
         let pool_npub = inner.pool_as_ref()?.public_key;
-        // TODO: receive the response on a derived npub;
-        let my_npub = inner.client.get_keys()?.public_key();
 
         inner
             .client
-            .send_pool_message(&pool_npub, PoolMessage::Join(Some(my_npub)))?;
+            .send_pool_message(&pool_npub, PoolMessage::Join(None))?;
         let (timeout, _) = inner.start_timeline()?;
         drop(inner);
 
@@ -539,9 +537,7 @@ impl Joinstr<'_> {
                 .relay(relay)?;
             dummy_client.connect_nostr()?;
 
-            let dummy_response_key = Keys::generate().public_key();
-            dummy_client
-                .send_pool_message(&pool_pubkey, PoolMessage::Join(Some(dummy_response_key)))?;
+            dummy_client.send_pool_message(&pool_pubkey, PoolMessage::Join(None))?;
         }
 
         let mut backoff = Backoff::new_us(WAIT);
