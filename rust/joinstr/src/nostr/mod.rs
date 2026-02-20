@@ -667,6 +667,46 @@ impl InputDataSigned {
 
 use base64ct::Encoding;
 
+struct PythonJsonFormatter;
+
+impl serde_json::ser::Formatter for PythonJsonFormatter {
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        writer.write_all(b": ")
+    }
+
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+}
+
+fn to_python_json_string(value: &Value) -> Result<String, serde_json::Error> {
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonJsonFormatter);
+    serde::Serialize::serialize(value, &mut ser)?;
+    Ok(String::from_utf8(buf).expect("valid utf8"))
+}
+
 impl PoolMessage {
     pub fn to_json(&self) -> Result<Value, SerializeError> {
         let mut map = Map::new();
@@ -710,8 +750,7 @@ impl PoolMessage {
 
     pub fn to_string(&self) -> Result<String, SerializeError> {
         let json = self.to_json()?;
-        let str = serde_json::to_string(&json)?;
-        Ok(str)
+        Ok(to_python_json_string(&json)?)
     }
 
     pub fn to_string_pretty(&self) -> Result<String, SerializeError> {
@@ -1036,5 +1075,20 @@ pub mod tests {
         let event = builder.to_event(&keys).unwrap();
         let roundtrip: Pool = event.try_into().unwrap();
         assert_eq!(pool, roundtrip);
+    }
+
+    #[test]
+    fn python_json_compat() {
+        let join = PoolMessage::Join(None);
+        let s = join.to_string().unwrap();
+        assert!(s.contains(r#""type": "join_pool""#), "join: {s}");
+        assert_eq!(s, r#"{"type": "join_pool"}"#);
+
+        let output = PoolMessage::Output(
+            Address::from_str("bc1q4smd35jchznp0u442zhyv5yawf200ffet5kqc9").unwrap(),
+        );
+        let s = output.to_string().unwrap();
+        assert!(s.contains(r#""type": "output""#), "output: {s}");
+        assert!(s.contains(r#""address": "#), "output addr: {s}");
     }
 }
