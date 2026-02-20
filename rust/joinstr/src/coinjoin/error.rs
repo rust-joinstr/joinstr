@@ -18,6 +18,8 @@ pub enum Error {
     Electrum(electrum::Error),
     FailVerifyAmount,
     AmountMissing,
+    InputValueOutOfRange(u64, u64, u64),
+    FeeBoundsViolation(u64, u64, u64),
     Unknown(String),
 }
 
@@ -64,6 +66,16 @@ impl Display for Error {
             Error::AmountMissing => write!(
                 f,
                 "The input amount is missing and no electrum client provided"
+            ),
+            Error::InputValueOutOfRange(value, min, max) => write!(
+                f,
+                "Input value {} sats is outside allowed range [{}, {}]",
+                value, min, max
+            ),
+            Error::FeeBoundsViolation(fee, min, max) => write!(
+                f,
+                "Fee {} sats is outside allowed bounds [{}, {}]",
+                fee, min, max
             ),
             Error::Unknown(e) => write!(f, "Unknown error: {}", e),
         }

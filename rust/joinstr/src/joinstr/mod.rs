@@ -444,12 +444,10 @@ impl Joinstr<'_> {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.pool_exists()?;
         let pool_npub = inner.pool_as_ref()?.public_key;
-        // TODO: receive the response on a derived npub;
-        let my_npub = inner.client.get_keys()?.public_key();
 
         inner
             .client
-            .send_pool_message(&pool_npub, PoolMessage::Join(Some(my_npub)))?;
+            .send_pool_message(&pool_npub, PoolMessage::Join(None))?;
         let (timeout, _) = inner.start_timeline()?;
         drop(inner);
 
@@ -458,8 +456,9 @@ impl Joinstr<'_> {
         let mut connected = false;
         while now() < timeout {
             let mut inner = self.inner.lock().expect("poisoned");
-            if let Some(PoolMessage::Credentials(Credentials { id, key })) =
-                inner.client.try_receive_pool_msg()?
+            if let Some(PoolMessage::Credentials(Credentials {
+                id, private_key, ..
+            })) = inner.client.try_receive_pool_msg()?
             {
                 log::debug!(
                     "Coordinator({}).connect_to_pool(): receive credentials.",
@@ -467,7 +466,7 @@ impl Joinstr<'_> {
                 );
                 if id == inner.pool_as_ref()?.id {
                     // we create a new nostr client using pool keys and replace the actual one
-                    let keys = Keys::new(key);
+                    let keys = Keys::new(private_key);
                     let fg = &inner.client.name;
                     let name = format!("prev_{fg}");
                     let mut new_client = NostrClient::new(&name)
@@ -538,9 +537,7 @@ impl Joinstr<'_> {
                 .relay(relay)?;
             dummy_client.connect_nostr()?;
 
-            let dummy_response_key = Keys::generate().public_key();
-            dummy_client
-                .send_pool_message(&pool_pubkey, PoolMessage::Join(Some(dummy_response_key)))?;
+            dummy_client.send_pool_message(&pool_pubkey, PoolMessage::Join(None))?;
         }
 
         let mut backoff = Backoff::new_us(WAIT);
@@ -552,9 +549,38 @@ impl Joinstr<'_> {
                     (PoolMessage::Join(Some(npub)), send_response) => {
                         if !peers.contains(&npub) {
                             if send_response {
+                                let pool_ref = inner.pool_as_ref()?;
+                                let payload = inner.payload_as_ref().ok();
                                 let response = PoolMessage::Credentials(Credentials {
-                                    id: inner.pool_as_ref()?.id.clone(),
-                                    key: inner.client.get_keys()?.secret_key().clone(),
+                                    id: pool_ref.id.clone(),
+                                    private_key: inner.client.get_keys()?.secret_key().clone(),
+                                    public_key: Some(pool_ref.public_key.to_string()),
+                                    denomination: payload.map(|p| p.denomination),
+                                    peers: payload.map(|p| p.peers),
+                                    timeout: payload.and_then(|p| match p.timeout {
+                                        Timeline::Simple(t) => Some(t),
+                                        _ => None,
+                                    }),
+                                    relay: payload.map(|p| p.relay.clone()),
+                                    fee_rate: payload.and_then(|p| match &p.fee {
+                                        Fee::Fixed(f) => Some(*f),
+                                        _ => None,
+                                    }),
+                                    transport: payload.map(|p| {
+                                        if p.transport.tor.as_ref().map_or(false, |t| t.enable) {
+                                            "tor".into()
+                                        } else if p
+                                            .transport
+                                            .vpn
+                                            .as_ref()
+                                            .map_or(false, |v| v.enable)
+                                        {
+                                            "vpn".into()
+                                        } else {
+                                            String::new()
+                                        }
+                                    }),
+                                    vpn_gateway: payload.and_then(|p| p.vpn_gateway.clone()),
                                 });
                                 inner.client.send_pool_message(&npub, response)?;
                             }
@@ -569,8 +595,12 @@ impl Joinstr<'_> {
                             );
                         }
                     }
-                    // TODO: do not panic here
-                    (PoolMessage::Join(None), _) => panic!("cannot answer if npub is None!"),
+                    (PoolMessage::Join(None), _) => {
+                        log::error!(
+                            "Coordinator({}).register_outputs(): received Join with no npub, skipping",
+                            inner.client.name
+                        );
+                    }
                     (PoolMessage::Output(o), _) => {
                         log::error!(
                             "Coordinator({}).register_outputs(): receive Output({:?}) request before output registartion step!",
@@ -635,10 +665,12 @@ impl Joinstr<'_> {
                         inner.outputs.push(o.assume_checked());
                         notif();
                     }
-                    // FIXME: here it can be some cases where, because network timing, we can
-                    // receive a signed input before the output registration round ended, we should
-                    // store those inputs in order to use them later.
-                    PoolMessage::Input(_) => todo!("store input"),
+                    PoolMessage::Input(_) => {
+                        log::warn!(
+                            "Coordinator({}).register_outputs(): received Input during output registration, ignoring",
+                            inner.client.name
+                        );
+                    }
                     r => {
                         // NOTE: simply drop other kind of messages
                         log::debug!(
@@ -1249,9 +1281,10 @@ impl<'a> JoinstrInner<'a> {
             denomination: self.denomination.ok_or(Error::DenominationMissing)?,
             peers: self.peers_count.ok_or(Error::PeerMissing)?,
             timeout: self.timeout.ok_or(Error::TimeoutMissing)?,
-            relays: self.relay.clone().map(|r| vec![r]).unwrap_or_default(),
+            relay: self.relay.clone().unwrap_or_default(),
             fee: self.fee.clone().ok_or(Error::FeeMissing)?,
             transport,
+            vpn_gateway: None,
         };
         let mut engine = sha256::Hash::engine();
         engine.input(&public_key.clone().to_bytes());
@@ -1265,7 +1298,7 @@ impl<'a> JoinstrInner<'a> {
         let id = sha256::Hash::from_engine(engine).to_string();
 
         let pool = Pool {
-            versions: default_version(),
+            version: default_version(),
             id,
             pool_type: PoolType::Create,
             public_key,
@@ -1415,18 +1448,40 @@ impl<'a> JoinstrInner<'a> {
         if let Some(input) = self.input.take() {
             log::debug!("Joinstr::register_input({name}) signing input ...");
             let signed_input = signer
-                .sign_input(&unsigned, input)
+                .sign_input(&unsigned, input.clone())
                 .map_err(Error::SigningFail)?;
             log::debug!("Joinstr::register_input({name}) input signed!");
-            let msg = PoolMessage::Input(signed_input.clone());
+
+            use miniscript::bitcoin::{Psbt, Transaction, TxIn};
+
+            let mut psbt = Psbt::from_unsigned_tx(Transaction {
+                version: unsigned.version,
+                lock_time: unsigned.lock_time,
+                input: vec![TxIn {
+                    previous_output: signed_input.txin.previous_output,
+                    sequence: signed_input.txin.sequence,
+                    ..Default::default()
+                }],
+                output: unsigned.output.clone(),
+            })
+            .map_err(|_| Error::Coinjoin(crate::coinjoin::Error::TxToPsbt))?;
+
+            use miniscript::bitcoin::psbt;
+            psbt.inputs[0] = psbt::Input {
+                witness_utxo: Some(input.txout.clone()),
+                sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)),
+                final_script_witness: Some(signed_input.txin.witness.clone()),
+                ..Default::default()
+            };
+
+            let msg = PoolMessage::Psbt(psbt);
             self.pool_exists()?;
             let npub = self.pool_as_ref()?.public_key;
-            log::debug!("Joinstr::register_input({name}) sending signed input to pool..");
+            log::debug!("Joinstr::register_input({name}) sending signed PSBT to pool..");
             self.client.send_pool_message(&npub, msg)?;
             self.inputs.push(signed_input);
             notif();
             log::debug!("Joinstr::register_input({name}) input sent & locally registered!");
-            // TODO: handle re-send if fails
             Ok(())
         } else {
             Err(Error::InputMissing)
