@@ -4,7 +4,7 @@
 //! it can complete a coinjoin alongside the Python Electrum joinstr plugin.
 //!
 //! Configurable via env vars (all optional, defaults target the local Polar regtest):
-//!   MNEMONIC   - BIP39 seed of the wallet providing the input (default: "Default 2")
+//!   MNEMONIC   - BIP39 seed of the wallet providing the input (default: canonical test vector)
 //!   RELAY      - nostr relay url            (default: wss://nos.lol)
 //!   ELECTRUM   - electrum server host:port  (default: 127.0.0.1:50001)
 //!   NETWORK    - bitcoin/testnet/signet/regtest (default: regtest)
@@ -22,8 +22,10 @@ use joinstr::{
     signer::WpkhHotSigner,
 };
 
+// Canonical BIP39 test vector. The Rust signer is BIP39-only and Electrum wallets use a
+// different seed scheme, so the Rust peer runs its own independent (funded) wallet.
 const DEFAULT_MNEMONIC: &str =
-    "champion rail toward scan service bench rather empower object defense two bring";
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
