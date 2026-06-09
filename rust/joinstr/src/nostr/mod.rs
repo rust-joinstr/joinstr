@@ -123,7 +123,7 @@ mod serde_relay {
             serde_json::Value::String(s) => Ok(s),
             serde_json::Value::Array(arr) => {
                 if arr.is_empty() {
-                    return Ok(String::new());
+                    return Err(serde::de::Error::custom("relay array is empty"));
                 }
                 // Leniently picks the first string entry; non-string elements
                 // are ignored to tolerate mixed-type arrays from other implementations.
@@ -876,7 +876,7 @@ pub mod tests {
               "denomination": 10000000,
               "peers": 5,
               "timeout": 12345,
-              "relays": [],
+              "relays": ["wss://relay.example.com"],
               "fee_rate": 12,
               "transport": {
                 "vpn": {
@@ -911,6 +911,30 @@ pub mod tests {
             parsed.payload.as_ref().unwrap().denomination,
             Amount::from_btc(0.1).unwrap()
         );
+    }
+
+    #[test]
+    fn pool_empty_relays_array_rejected() {
+        // An empty relays array is no longer silently coerced to "". The relay
+        // deserializer rejects it, which (via flattened Option<PoolPayload>)
+        // drops the payload rather than yielding a pool with an empty relay.
+        let raw = r#"
+            {
+              "version": "1",
+              "type": "new_pool",
+              "id": "123",
+              "public_key": "0000000000000000000000000000000000000000000000000000000000000001",
+              "network": "regtest",
+              "denomination": 10000000,
+              "peers": 5,
+              "timeout": 12345,
+              "relays": [],
+              "fee_rate": 12,
+              "transport": { "vpn": { "enable": false } }
+            }
+        "#;
+        let parsed: Pool = serde_json::from_str(raw).unwrap();
+        assert!(parsed.payload.is_none());
     }
 
     #[test]
