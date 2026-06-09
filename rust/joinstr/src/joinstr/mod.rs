@@ -530,12 +530,16 @@ impl Joinstr<'_> {
             .min_peer(payload.peers)
             .fee(fee as usize);
 
+        // the coordinator's own dummy join (used to kickstart the relay subscription)
+        // must not be counted as a peer, else it consumes a `min_peers` slot.
+        let mut dummy_npub: Option<PublicKey> = None;
         if role == Role::Initiator {
             // send a dummy join request
             let mut dummy_client = NostrClient::new("dummy")
                 .keys(Keys::generate())?
                 .relay(relay)?;
             dummy_client.connect_nostr()?;
+            dummy_npub = Some(dummy_client.get_keys()?.public_key());
 
             dummy_client.send_pool_message(&pool_pubkey, PoolMessage::Join(None))?;
         }
@@ -546,6 +550,9 @@ impl Joinstr<'_> {
             let mut inner = self.inner.lock().expect("poisoned");
             if let Ok(Some(msg)) = inner.client.try_receive_pool_msg() {
                 match (msg, matches!(inner.role, Role::Initiator)) {
+                    (PoolMessage::Join(Some(npub)), _) if Some(npub) == dummy_npub => {
+                        // ignore our own kickstart join request
+                    }
                     (PoolMessage::Join(Some(npub)), send_response) => {
                         if !peers.contains(&npub) {
                             if send_response {
@@ -567,13 +574,9 @@ impl Joinstr<'_> {
                                         _ => None,
                                     }),
                                     transport: payload.map(|p| {
-                                        if p.transport.tor.as_ref().map_or(false, |t| t.enable) {
+                                        if p.transport.tor.as_ref().is_some_and(|t| t.enable) {
                                             "tor".into()
-                                        } else if p
-                                            .transport
-                                            .vpn
-                                            .as_ref()
-                                            .map_or(false, |v| v.enable)
+                                        } else if p.transport.vpn.as_ref().is_some_and(|v| v.enable)
                                         {
                                             "vpn".into()
                                         } else {
@@ -1404,7 +1407,7 @@ impl<'a> JoinstrInner<'a> {
         T: crate::coinjoin::BitcoinBackend,
     {
         for addr in outputs {
-            if addr.is_valid_for_network(self.pool_as_ref()?.network) {
+            if addr.is_valid_for_network(self.network) {
                 let addr = addr.assume_checked();
                 // FIXME: should we check if the output have been added?
                 coinjoin.add_output(addr);
@@ -1469,6 +1472,7 @@ impl<'a> JoinstrInner<'a> {
             use miniscript::bitcoin::psbt;
             psbt.inputs[0] = psbt::Input {
                 witness_utxo: Some(input.txout.clone()),
+                // 0x81 = SIGHASH_ALL | SIGHASH_ANYONECANPAY, required by the JoinStr protocol
                 sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)),
                 final_script_witness: Some(signed_input.txin.witness.clone()),
                 ..Default::default()

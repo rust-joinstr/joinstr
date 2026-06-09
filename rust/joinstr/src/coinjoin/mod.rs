@@ -49,7 +49,7 @@ where
     /// # Arguments
     /// * `denomination` - The coinjoin denomination
     /// * `client` - An optionnal electrum client, to be used for address reuse
-    ///     and input amount check.
+    ///   and input amount check.
     pub fn new(denomination: Amount, client: Option<&'a mut C>) -> Self {
         CoinJoin {
             psbt: None,
@@ -219,16 +219,15 @@ where
         }
 
         // Python: denomination + 500 <= input_value <= denomination + 5000
-        if let Some(input_value) = input.amount {
-            let min = self.denomination + Amount::from_sat(500);
-            let max = self.denomination + Amount::from_sat(5000);
-            if input_value < min || input_value > max {
-                return Err(Error::InputValueOutOfRange(
-                    input_value.to_sat(),
-                    min.to_sat(),
-                    max.to_sat(),
-                ));
-            }
+        let input_value = input.amount.ok_or(Error::AmountMissing)?;
+        let min = self.denomination + Amount::from_sat(500);
+        let max = self.denomination + Amount::from_sat(5000);
+        if input_value < min || input_value > max {
+            return Err(Error::InputValueOutOfRange(
+                input_value.to_sat(),
+                min.to_sat(),
+                max.to_sat(),
+            ));
         }
 
         // If an electrum client is provided, we verify our peer isn't lying
@@ -369,12 +368,11 @@ where
             tx.input.push(i.txin.clone());
         }
 
-        // if not dry_run
-        if let Some(fee) = fee {
-            let tx_weight = tx.weight().to_wu();
-            if (((fee.to_sat() as f64) / (tx_weight as f64)) < (self.fee as f64)) && !dry_run {
-                return Err(Error::FeeTooLow(self.fee as u64, tx_weight, fee.to_sat()));
-            }
+        // The total fee is already validated against the Python-compatible bounds
+        // (N*100 ..= N*10000) above. Python does not enforce an additional per-vByte
+        // floor at finalization (and skips even the bounds check on regtest), so we
+        // don't either.
+        if fee.is_some() {
             self.tx = Some(tx);
             Ok(None)
         } else {
