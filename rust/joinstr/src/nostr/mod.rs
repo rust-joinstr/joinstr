@@ -107,7 +107,7 @@ mod serde_denomination {
 mod serde_relay {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(relay: &String, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(relay: &str, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -151,9 +151,9 @@ mod serde_transport {
     where
         S: Serializer,
     {
-        if transport.tor.as_ref().map_or(false, |t| t.enable) {
+        if transport.tor.as_ref().is_some_and(|t| t.enable) {
             serializer.serialize_str("tor")
-        } else if transport.vpn.as_ref().map_or(false, |v| v.enable) {
+        } else if transport.vpn.as_ref().is_some_and(|v| v.enable) {
             serializer.serialize_str("vpn")
         } else {
             serializer.serialize_str("")
@@ -772,12 +772,11 @@ impl PoolMessage {
         map.insert("version".into(), "1".into());
         match self {
             PoolMessage::Psbt(psbt) => {
+                // Python plugin expects {"type": "input", "psbt": "<base64>"} with psbt at top level
                 map.insert("type".into(), "input".into());
                 let psbt_bytes = psbt.serialize();
                 let psbt_b64 = base64ct::Base64::encode_string(&psbt_bytes);
-                let mut input_obj = Map::new();
-                input_obj.insert("psbt".into(), Value::String(psbt_b64));
-                map.insert("input".into(), Value::Object(input_obj));
+                map.insert("psbt".into(), Value::String(psbt_b64));
             }
             PoolMessage::Transaction(tx) => {
                 map.insert("type".into(), "transaction".into());
@@ -795,15 +794,17 @@ impl PoolMessage {
                 map.insert("input".into(), input.to_json());
             }
             PoolMessage::Output(addr) => {
-                map.insert("type".into(), "outputs".into());
-                map.insert(
-                    "outputs".into(),
-                    Value::Array(vec![serde_json::to_value(addr)?]),
-                );
+                // Python plugin expects {"type": "output", "address": "<addr>"}
+                map.insert("type".into(), "output".into());
+                map.insert("address".into(), serde_json::to_value(addr)?);
             }
             PoolMessage::Credentials(cred) => {
-                map.insert("type".into(), "credentials".into());
-                map.insert("credentials".into(), serde_json::to_value(cred)?);
+                // Python plugin expects a flat credentials object with top-level private_key
+                if let Value::Object(fields) = serde_json::to_value(cred)? {
+                    for (key, value) in fields {
+                        map.insert(key, value);
+                    }
+                }
             }
         }
         Ok(map.into())
@@ -993,8 +994,8 @@ pub mod tests {
         let msg = PoolMessage::from_str(raw).unwrap();
         assert!(matches!(msg, PoolMessage::Output(_)));
         let serialized = msg.to_string().unwrap();
-        assert!(serialized.contains(r#""type": "outputs""#), "{serialized}");
-        assert!(serialized.contains(r#""outputs": ["#), "{serialized}");
+        assert!(serialized.contains(r#""type": "output""#), "{serialized}");
+        assert!(serialized.contains(r#""address": "#), "{serialized}");
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();
         assert_eq!(msg, roundtrip);
     }
@@ -1153,8 +1154,11 @@ pub mod tests {
             Address::from_str("bc1q4smd35jchznp0u442zhyv5yawf200ffet5kqc9").unwrap(),
         );
         let s = output.to_string().unwrap();
-        assert!(s.contains(r#""type": "outputs""#), "output: {s}");
-        assert!(s.contains(r#""outputs": ["#), "output array: {s}");
+        assert!(s.contains(r#""type": "output""#), "output: {s}");
+        assert!(
+            s.contains(r#""address": "bc1q4smd35jchznp0u442zhyv5yawf200ffet5kqc9""#),
+            "output address: {s}"
+        );
     }
 
     #[test]
@@ -1198,12 +1202,7 @@ pub mod tests {
         let obj = json.as_object().unwrap();
         assert_eq!(obj.get("version").unwrap(), "1");
         assert_eq!(obj.get("type").unwrap(), "input");
-        assert!(obj
-            .get("input")
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .contains_key("psbt"));
+        assert!(obj.get("psbt").unwrap().is_string());
 
         let serialized = msg.to_string().unwrap();
         let roundtrip = PoolMessage::from_str(&serialized).unwrap();
