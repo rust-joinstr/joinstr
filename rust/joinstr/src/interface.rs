@@ -80,6 +80,7 @@ pub struct PeerConfig {
     pub input: Coin,
     pub output: Address<NetworkUnchecked>,
     pub relay: String,
+    pub network: Network,
 }
 
 /// List available coins
@@ -192,11 +193,11 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
         (&url, port),
         coin,
         addr,
-        pool.network,
+        peer.network,
         "peer",
     )?;
 
-    let mut signer = WpkhHotSigner::new_from_mnemonics(pool.network, &peer.mnemonics.to_string())?;
+    let mut signer = WpkhHotSigner::new_from_mnemonics(peer.network, &peer.mnemonics.to_string())?;
     let client = Client::new(&url, port)?;
     signer.set_client(client);
 
