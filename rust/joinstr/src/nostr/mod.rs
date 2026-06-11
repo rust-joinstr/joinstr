@@ -73,6 +73,20 @@ impl TryFrom<Psbt> for InputDataSigned {
     }
 }
 
+// Denomination wire contract.
+//
+// The joinstr clients disagree on how `denomination` is encoded on the wire:
+//   - the Electrum plugin and the web GUI publish it as a BTC float (e.g. `0.00049`),
+//   - the CLI daemon (`joinstrd.py`) publishes it as a sats integer (e.g. `49000`).
+//
+// We discriminate on the JSON number type: a float is read as BTC, a bare integer
+// as sats. This reads all three clients correctly because the float-based clients
+// always emit a decimal point (Python `json.dumps(float(x))`). We always *emit* a
+// BTC float, matching the plugin and web GUI.
+//
+// Caveat: a whole-BTC denomination sent as a bare integer (e.g. `1` meaning 1 BTC)
+// would be misread as 1 sat. No known client does this, but a peer wanting an
+// integer number of BTC must encode it as a float (`1.0`).
 mod serde_denomination {
     use miniscript::bitcoin::Amount;
     use serde::{self, Deserialize, Deserializer, Serializer};
@@ -900,6 +914,51 @@ pub mod tests {
         assert_eq!(payload.fee, Fee::Fixed(12));
         assert!(payload.transport.vpn.as_ref().unwrap().enable);
         assert!(!payload.transport.tor.as_ref().unwrap().enable);
+    }
+
+    #[test]
+    fn denomination_float_is_btc_int_is_sats() {
+        let pool = |denom: &str| {
+            format!(
+                r#"{{"type":"new_pool","id":"1","public_key":"0000000000000000000000000000000000000000000000000000000000000001","denomination":{denom},"peers":2,"timeout":1,"relay":"wss://r","fee_rate":1,"transport":"tor"}}"#
+            )
+        };
+
+        // BTC float (Electrum plugin / web GUI) -> interpreted as BTC
+        let p: Pool = serde_json::from_str(&pool("0.00049")).unwrap();
+        assert_eq!(p.payload.unwrap().denomination, Amount::from_sat(49_000));
+
+        // bare integer (CLI daemon) -> interpreted as sats
+        let p: Pool = serde_json::from_str(&pool("49000")).unwrap();
+        assert_eq!(p.payload.unwrap().denomination, Amount::from_sat(49_000));
+
+        // whole-BTC float (1.0) -> 1 BTC, not 1 sat
+        let p: Pool = serde_json::from_str(&pool("1.0")).unwrap();
+        assert_eq!(
+            p.payload.unwrap().denomination,
+            Amount::from_btc(1.0).unwrap()
+        );
+
+        // we always *emit* a BTC float that round-trips back to the same sats
+        let payload = PoolPayload {
+            denomination: Amount::from_sat(49_000),
+            peers: 2,
+            timeout: Timeline::Simple(1),
+            relay: "wss://r".into(),
+            fee: Fee::Fixed(1),
+            transport: Transport {
+                vpn: None,
+                tor: Some(Tor { enable: true }),
+            },
+            vpn_gateway: None,
+        };
+        let v = serde_json::to_value(&payload).unwrap();
+        let d = v.get("denomination").unwrap();
+        assert!(d.is_f64(), "denomination must serialize as a float: {v}");
+        assert_eq!(
+            Amount::from_btc(d.as_f64().unwrap()).unwrap(),
+            Amount::from_sat(49_000)
+        );
     }
 
     #[test]
