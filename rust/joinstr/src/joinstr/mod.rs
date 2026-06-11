@@ -1510,6 +1510,41 @@ impl<'a> JoinstrInner<'a> {
             self.client.name,
             input
         );
+        // When an electrum client is available, verify the peer-supplied input amount
+        // against the chain so a peer cannot lie about its input value. Every participant
+        // checks this independently; the local CoinJoin has no backend wired in, so the
+        // check happens here instead.
+        if let Some(client) = self.electrum_client.as_mut() {
+            use crate::coinjoin::BitcoinBackend;
+            match client.get_outpoint_value(input.txin.previous_output) {
+                Ok(Some(chain_amount)) => {
+                    if input.amount != Some(chain_amount) {
+                        log::error!(
+                            "Joinstr::register_input({}): input amount mismatch (claimed {:?}, chain {}), dropping",
+                            self.client.name,
+                            input.amount,
+                            chain_amount,
+                        );
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {
+                    log::error!(
+                        "Joinstr::register_input({}): input {} not found on chain, dropping",
+                        self.client.name,
+                        input.txin.previous_output,
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::error!(
+                        "Joinstr::register_input({}): electrum lookup failed ({e:?}), dropping",
+                        self.client.name,
+                    );
+                    return Ok(());
+                }
+            }
+        }
         // Register inputs
         if let Some(coinjoin) = self.coinjoin.as_mut() {
             if let Err(e) = coinjoin.add_input(input.clone()) {
