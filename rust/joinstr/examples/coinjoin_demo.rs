@@ -1,6 +1,6 @@
 //! Full Rust-driven coinjoin against an external regtest chain.
 //!
-//! A coordinator plus two peers complete and broadcast a real coinjoin transaction
+//! An initiator plus two peers complete and broadcast a real coinjoin transaction
 //! through the configured electrum server. Uses a local in-process nostr relay so the
 //! run is self-contained; the bitcoin side is whatever electrum points at (e.g. your
 //! Polar regtest electrs on 127.0.0.1:50001).
@@ -82,13 +82,14 @@ fn main() {
     let addr_a = signer.recv_addr_at(200).as_unchecked().clone();
     let addr_b = signer.recv_addr_at(201).as_unchecked().clone();
 
-    // coordinator: posts the pool, aggregates, broadcasts (no input of its own)
-    let mut coordinator = Joinstr::new_initiator(
+    // initiator: creates the pool and runs the rounds like any peer, but contributes
+    // no input/output of its own here (every participant builds & broadcasts the tx)
+    let mut initiator = Joinstr::new_initiator(
         Keys::generate(),
         relay.clone(),
         (host, port),
         network,
-        "coordinator",
+        "initiator",
     )
     .expect("initiator")
     .denomination(denom_btc)
@@ -100,14 +101,14 @@ fn main() {
     .min_peers(2)
     .expect("min_peers");
 
-    let coord_handle = thread::spawn(move || {
-        coordinator
+    let init_handle = thread::spawn(move || {
+        initiator
             .start_coinjoin_blocking(None, Option::<WpkhHotSigner>::None, || {})
-            .expect("coordinator coinjoin");
-        coordinator.final_tx()
+            .expect("initiator coinjoin");
+        initiator.final_tx()
     });
 
-    // fetch the pool the coordinator just posted
+    // fetch the pool the initiator just posted
     let mut listener = NostrClient::new("listener")
         .relay(relay.clone())
         .expect("relay")
@@ -137,9 +138,9 @@ fn main() {
         let _ = peer_b.start_coinjoin_blocking(Some(pool), Some(signer), || {});
     });
 
-    let final_tx = coord_handle
+    let final_tx = init_handle
         .join()
-        .expect("coordinator thread")
+        .expect("initiator thread")
         .expect("coinjoin produced a tx");
     let _ = h_a.join();
     let _ = h_b.join();

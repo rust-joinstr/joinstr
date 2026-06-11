@@ -276,7 +276,7 @@ impl Joinstr<'_> {
         Ok(peer)
     }
 
-    /// Create a new [`Joinstr`] instance that have a `Coordinator` role, this role means
+    /// Create a new [`Joinstr`] instance that have an `Initiator` role, this role means
     ///   this instance will only initiate & monitor the coinjoin but will not add input
     ///   nor output.
     ///
@@ -461,7 +461,7 @@ impl Joinstr<'_> {
             })) = inner.client.try_receive_pool_msg()?
             {
                 log::debug!(
-                    "Coordinator({}).connect_to_pool(): receive credentials.",
+                    "Joinstr::connect_to_pool({}): receive credentials.",
                     inner.client.name
                 );
                 if id == inner.pool_as_ref()?.id {
@@ -478,7 +478,7 @@ impl Joinstr<'_> {
                     break;
                 } else {
                     log::error!(
-                        "Coordinator({}).connect_to_pool(): pool id not match!",
+                        "Joinstr::connect_to_pool({}): pool id not match!",
                         inner.client.name
                     );
                 }
@@ -530,7 +530,7 @@ impl Joinstr<'_> {
             .min_peer(payload.peers)
             .fee(fee as usize);
 
-        // the coordinator's own dummy join (used to kickstart the relay subscription)
+        // the initiator's own dummy join (used to kickstart the relay subscription)
         // must not be counted as a peer, else it consumes a `min_peers` slot.
         let mut dummy_npub: Option<PublicKey> = None;
         if role == Role::Initiator {
@@ -591,7 +591,7 @@ impl Joinstr<'_> {
                             inner.peers.push(npub);
                             notif();
                             log::debug!(
-                                "Coordinator({}).register_outputs(): receive Join({}) request. \n      peers: {}",
+                                "Joinstr::register_outputs({}): receive Join({}) request. \n      peers: {}",
                                 inner.client.name,
                                 npub,
                                 peers.len()
@@ -600,13 +600,13 @@ impl Joinstr<'_> {
                     }
                     (PoolMessage::Join(None), _) => {
                         log::error!(
-                            "Coordinator({}).register_outputs(): received Join with no npub, skipping",
+                            "Joinstr::register_outputs({}): received Join with no npub, skipping",
                             inner.client.name
                         );
                     }
                     (PoolMessage::Output(o), _) => {
                         log::error!(
-                            "Coordinator({}).register_outputs(): receive Output({:?}) request before output registartion step!",
+                            "Joinstr::register_outputs({}): receive Output({:?}) request before output registartion step!",
                             inner.client.name,
                             o
                         );
@@ -616,7 +616,7 @@ impl Joinstr<'_> {
                     r => {
                         // NOTE: simply drop other kind of messages
                         log::debug!(
-                            "Coordinator({}).register_outputs(): request not handled at peer registration step: {:?}!",
+                            "Joinstr::register_outputs({}): request not handled at peer registration step: {:?}!",
                             inner.client.name,
                             r
                         );
@@ -651,13 +651,13 @@ impl Joinstr<'_> {
                     PoolMessage::Join(_) => {
                         // FIXME: we should not log an error here
                         log::error!(
-                            "Coordinator({}).register_outputs(): receive Join request at output registration step!",
+                            "Joinstr::register_outputs({}): receive Join request at output registration step!",
                             inner.client.name,
                         );
                     }
                     PoolMessage::Output(o) => {
                         log::debug!(
-                            "Coordinator({}).register_outputs(): receive Output({:?}) request.",
+                            "Joinstr::register_outputs({}): receive Output({:?}) request.",
                             inner.client.name,
                             o
                         );
@@ -670,14 +670,14 @@ impl Joinstr<'_> {
                     }
                     PoolMessage::Input(_) => {
                         log::warn!(
-                            "Coordinator({}).register_outputs(): received Input during output registration, ignoring",
+                            "Joinstr::register_outputs({}): received Input during output registration, ignoring",
                             inner.client.name
                         );
                     }
                     r => {
                         // NOTE: simply drop other kind of messages
                         log::debug!(
-                            "Coordinator({}).register_outputs(): request not handled at output registration step: {:?}!",
+                            "Joinstr::register_outputs({}): request not handled at output registration step: {:?}!",
                             inner.client.name,
                             r
                         );
@@ -779,7 +779,7 @@ impl Joinstr<'_> {
                     m => {
                         // NOTE: simply drop other kind of messages
                         log::error!(
-                            "Coordinator({}).register_input(): drop message {:?}",
+                            "Joinstr::register_input({}): drop message {:?}",
                             inner.client.name,
                             m
                         );
@@ -1237,22 +1237,22 @@ impl<'a> JoinstrInner<'a> {
             Ok(())
         } else {
             if self.pool.is_some() {
-                log::error!("Coordinator.is_ready(): pool is not None!")
+                log::error!("Joinstr::is_ready(): pool is not None!")
             }
             if self.denomination.is_none() {
-                log::error!("Coordinator.is_ready(): denomination is missing!")
+                log::error!("Joinstr::is_ready(): denomination is missing!")
             }
             if self.peers_count.is_none() {
-                log::error!("Coordinator.is_ready(): peers is missing!")
+                log::error!("Joinstr::is_ready(): peers is missing!")
             }
             if self.timeout.is_none() {
-                log::error!("Coordinator.is_ready(): timeout is missing!")
+                log::error!("Joinstr::is_ready(): timeout is missing!")
             }
             if self.relay.is_none() {
-                log::error!("Coordinator.is_ready(): no relay specified!")
+                log::error!("Joinstr::is_ready(): no relay specified!")
             }
             if self.fee.is_none() {
-                log::error!("Coordinator.is_ready(): fee is missing!")
+                log::error!("Joinstr::is_ready(): fee is missing!")
             }
             Err(Error::ParamMissing)
         }
@@ -1397,7 +1397,7 @@ impl<'a> JoinstrInner<'a> {
     ///   - the address is not valid for the network
     ///
     /// Note: `outputs` is a Vec in order to allow a future compatibility
-    /// for several "coordinator" instances operating on differents nostr relays.
+    /// for several initiator instances operating on differents nostr relays.
     fn receive_outputs<T>(
         &mut self,
         outputs: Vec<Address<NetworkUnchecked>>,
@@ -1413,7 +1413,7 @@ impl<'a> JoinstrInner<'a> {
                 coinjoin.add_output(addr);
             } else {
                 log::debug!(
-                    "Coordinator({}).register_outputs(): address {:?} is not valid for network {}.",
+                    "Joinstr::register_outputs({}): address {:?} is not valid for network {}.",
                     self.client.name,
                     addr,
                     self.network
@@ -1506,7 +1506,7 @@ impl<'a> JoinstrInner<'a> {
     {
         self.coinjoin_exists()?;
         log::debug!(
-            "Coordinator({}).register_input(): receive Inputs({:?}) request.",
+            "Joinstr::register_input({}): receive Inputs({:?}) request.",
             self.client.name,
             input
         );
@@ -1549,7 +1549,7 @@ impl<'a> JoinstrInner<'a> {
         if let Some(coinjoin) = self.coinjoin.as_mut() {
             if let Err(e) = coinjoin.add_input(input.clone()) {
                 log::error!(
-                    "Coordinator({}).register_input(): fail to add input: {:?}",
+                    "Joinstr::register_input({}): fail to add input: {:?}",
                     self.client.name,
                     e
                 );
@@ -1577,7 +1577,7 @@ impl<'a> JoinstrInner<'a> {
             match coinjoin.generate_tx(false) {
                 Ok(_) => {
                     log::info!(
-                        "Coordinator({}).register_input(): coinjoin finalyzed!",
+                        "Joinstr::register_input({}): coinjoin finalyzed!",
                         self.client.name,
                     );
                     Ok(true)
