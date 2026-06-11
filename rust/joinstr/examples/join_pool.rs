@@ -61,7 +61,7 @@ fn main() {
 
     println!("network={network} relay={relay} electrum={electrum_host}:{electrum_port} denom={denom_sats}sat");
 
-    // 1. Discover the pool announced by the Python coordinator (kind 2022).
+    // 1. Discover the pool announced by the Python initiator (kind 2022).
     println!("listing pools (looking back 1h)...");
     let pools = list_pools(3600, 10_000_000, relay.clone()).expect("list_pools failed");
     println!("found {} pool(s)", pools.len());
@@ -115,7 +115,8 @@ fn main() {
         network,
     };
 
-    // 4. Run the coinjoin to completion. The Python coordinator aggregates & broadcasts.
+    // 4. Run the coinjoin to completion. Every participant aggregates the signed
+    //    inputs and broadcasts the final tx (there is no coordinator).
     println!("starting coinjoin...");
     match join_coinjoin(pool, peer) {
         Ok(txid) => println!("coinjoin complete, txid={txid}"),

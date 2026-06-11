@@ -119,8 +119,8 @@ fn simple_coinjoin() {
     // subscribe to 2020 event up to 1 day back in time
     pool_listener.subscribe_pools(24 * 60 * 60).unwrap();
 
-    // start a separate coordinator
-    let mut coordinator = Joinstr::new_initiator(
+    // start a separate initiator
+    let mut initiator = Joinstr::new_initiator(
         keys.clone(),
         relays.clone(),
         (&url, port),
@@ -137,11 +137,11 @@ fn simple_coinjoin() {
     .min_peers(2)
     .unwrap();
 
-    let coordinator_handle = thread::spawn(move || {
-        coordinator
+    let initiator_handle = thread::spawn(move || {
+        initiator
             .start_coinjoin_blocking(None, Option::<WpkhHotSigner>::None, || {})
             .unwrap();
-        coordinator.final_tx()
+        initiator.final_tx()
     });
 
     clear_nostr_log(&mut relay);
@@ -233,7 +233,7 @@ fn simple_coinjoin() {
         let _ = peer_b.start_coinjoin_blocking(Some(pool), Some(signer), || {});
     });
 
-    let final_tx = coordinator_handle.join().unwrap().unwrap();
+    let final_tx = initiator_handle.join().unwrap().unwrap();
     let _tx = bitcoind
         .client
         .get_raw_transaction(&final_tx.compute_txid(), None)
