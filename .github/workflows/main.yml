@@ -33,6 +33,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: tests
         run: cargo test --workspace --lib
+      - name: doctests
+        run: cargo test --workspace --doc
 
   build:
     runs-on: ubuntu-latest
