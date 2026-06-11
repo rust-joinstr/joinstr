@@ -386,4 +386,52 @@ where
 }
 
 #[cfg(test)]
-pub mod tests {}
+pub mod tests {
+    use super::*;
+    use miniscript::bitcoin::Address;
+    use std::str::FromStr;
+
+    // Coinjoin outputs must be emitted in BIP69 order (sorted by scriptPubKey),
+    // independent of the order peers register them. The Electrum plugin builds its
+    // transaction with PartialTransaction.from_io(BIP69_sort=True), which yields the
+    // same canonical order, so every peer signs over an identical output set
+    // (SIGHASH_ALL) and a cross-client coinjoin produces valid signatures.
+    #[test]
+    fn outputs_are_bip69_sorted() {
+        // distinct 20-byte witness programs: 0xaa.., 0x11.., 0x77..
+        let a = Address::from_str("bcrt1q42424242424242424242424242424242rt8pnt")
+            .unwrap()
+            .assume_checked(); // 0xaa
+        let b = Address::from_str("bcrt1qzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3lgth6c")
+            .unwrap()
+            .assume_checked(); // 0x11
+        let c = Address::from_str("bcrt1qwamhwamhwamhwamhwamhwamhwamhwamhje54fy")
+            .unwrap()
+            .assume_checked(); // 0x77
+
+        let mut cj = CoinJoin::<crate::electrum::Client>::new(Amount::from_sat(100_000), None)
+            .fee(1)
+            .min_peer(3);
+        // register in a scrambled (non-sorted) order
+        cj.add_output(a.clone());
+        cj.add_output(b.clone());
+        cj.add_output(c.clone());
+        cj.generate_psbt().unwrap();
+
+        let spks: Vec<_> = cj
+            .unsigned_tx()
+            .unwrap()
+            .output
+            .iter()
+            .map(|o| o.script_pubkey.clone())
+            .collect();
+        let mut expected = vec![a.script_pubkey(), b.script_pubkey(), c.script_pubkey()];
+        expected.sort();
+        assert_eq!(
+            spks, expected,
+            "outputs must be BIP69-sorted by scriptPubKey"
+        );
+        assert_eq!(spks[0], b.script_pubkey(), "0x11 program sorts first");
+        assert_eq!(spks[2], a.script_pubkey(), "0xaa program sorts last");
+    }
+}
