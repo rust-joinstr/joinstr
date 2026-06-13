@@ -1,0 +1,22 @@
+name: joinstr_flutter_example
+description: "Minimal usage example for joinstr_flutter."
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.2.3 <4.0.0"
+  flutter: ">=3.3.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  joinstr_flutter:
+    path: ../
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^5.1.1
+
+flutter:
+  uses-material-design: true
