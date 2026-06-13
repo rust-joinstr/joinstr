@@ -1,0 +1,11 @@
+include: package:lints/recommended.yaml
+linter:
+  rules:
+    prefer_single_quotes: false
+    avoid_print: false
+    non_constant_identifier_names: false
+
+analyzer:
+  exclude:
+    - lib/src/generated/**
+    - cargokit/**

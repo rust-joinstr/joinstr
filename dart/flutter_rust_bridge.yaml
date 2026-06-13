@@ -1,0 +1,9 @@
+rust_input: crate::api
+rust_root: rust/
+dart_output: lib/src/generated/
+c_output: ios/Classes/frb_generated.h
+add_mod_to_lib: false
+web: false
+dart3: true
+full_dep: true
+dart_entrypoint_class_name: joinstr
