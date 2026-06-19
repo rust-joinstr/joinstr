@@ -9,6 +9,7 @@ use joinstr::miniscript::bitcoin::{
 };
 use joinstr::nostr::{Fee, Pool, Timeline};
 use joinstr::signer::{Coin, CoinPath};
+use zeroize::Zeroize;
 
 use crate::api::error::JoinstrError;
 
@@ -136,9 +137,12 @@ pub struct FfiPeerConfig {
 impl TryFrom<FfiPeerConfig> for PeerConfig {
     type Error = JoinstrError;
 
-    fn try_from(value: FfiPeerConfig) -> Result<Self, Self::Error> {
+    fn try_from(mut value: FfiPeerConfig) -> Result<Self, Self::Error> {
         let mnemonics = Mnemonic::from_str(&value.mnemonic)
             .map_err(|e| JoinstrError::new(format!("invalid mnemonic: {e}")))?;
+        // Wipe our owned copy of the seed once it has been parsed; the parsed
+        // `Mnemonic` is what flows downstream.
+        value.mnemonic.zeroize();
         let output = Address::from_str(&value.output_address)
             .map_err(|e| JoinstrError::new(format!("invalid output address: {e}")))?;
         let input = Coin::try_from(value.input)?;
