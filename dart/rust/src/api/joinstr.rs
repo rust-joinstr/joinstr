@@ -8,6 +8,11 @@ use joinstr::nostr::Pool;
 use crate::api::error::JoinstrError;
 use crate::api::types::{BitcoinNetwork, FfiCoin, FfiPeerConfig, FfiPool, FfiPoolConfig};
 
+/// Upper bound on the number of derivation indexes a single `list_coins` call
+/// may scan. Each index issues two synchronous electrum queries, so an
+/// unbounded span (e.g. `0..u32::MAX`) would hang the caller indefinitely.
+const MAX_SCAN_SPAN: u32 = 100_000;
+
 /// List spendable coins by scanning electrum over derivation indexes
 /// `[range_start, range_end)` on both the receive and change branches.
 pub fn list_coins(
@@ -18,6 +23,17 @@ pub fn list_coins(
     range_end: u32,
     network: BitcoinNetwork,
 ) -> Result<Vec<FfiCoin>, JoinstrError> {
+    if range_end < range_start {
+        return Err(JoinstrError::new(format!(
+            "invalid range: end {range_end} is before start {range_start}"
+        )));
+    }
+    if range_end - range_start > MAX_SCAN_SPAN {
+        return Err(JoinstrError::new(format!(
+            "range span {} exceeds maximum {MAX_SCAN_SPAN}",
+            range_end - range_start
+        )));
+    }
     let coins = interface::list_coins(
         mnemonic,
         electrum_address,
