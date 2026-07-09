@@ -431,10 +431,8 @@ impl Client {
                                 txs.push(tx);
                             }
                             Response::Error(e) => {
-                                if send
-                                    .send(CoinResponse::Error(e.to_string()).into())
-                                    .is_err()
-                                {
+                                let rsp = CoinResponse::Error(e.to_string()).into();
+                                if send.send(rsp).is_err() {
                                     // NOTE: caller has dropped the channel
                                     // == Close request
                                     return;

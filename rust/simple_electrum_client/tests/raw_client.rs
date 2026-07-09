@@ -50,11 +50,7 @@ fn tcp_client() -> (Client, ElectrsD, BitcoinD) {
 }
 
 fn env_var(arg: &str) -> Option<String> {
-    if let Ok(value) = env::var(arg) {
-        Some(value)
-    } else {
-        None
-    }
+    env::var(arg).ok()
 }
 
 fn ssl_local_address() -> Option<String> {
