@@ -48,11 +48,6 @@ jobs:
         run: cargo test --workspace --lib
       - name: doctests
         run: cargo test --workspace --doc
-      # Separate workspace (see lint job); its unit tests cover the FFI
-      # boundary: scan-range bounds, pool decoding, mnemonic handling.
-      - name: tests (dart bindings)
-        working-directory: dart/rust
-        run: cargo test
 
   build:
     runs-on: ubuntu-latest
@@ -69,11 +64,20 @@ jobs:
     # dart/rust/src/frb_generated.rs is committed. Regenerate it and fail if it
     # differs, so a change to dart/rust/src/api can never land with stale
     # bindings (which breaks the build only once someone runs codegen).
+    #
+    # dart/rust's tests run here rather than in the `test` job because its
+    # dependency tree (icu_* via idna_adapter) requires rustc >= 1.86, so it
+    # cannot build on the older toolchain that job pins.
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          # codegen shells out to rustfmt for frb_generated.rs and silently
+          # emits unformatted output if it is absent, which the staleness
+          # check below would then report as a spurious diff.
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - uses: subosito/flutter-action@v2
         with:
@@ -106,6 +110,13 @@ jobs:
             echo "Run 'cd dart && flutter_rust_bridge_codegen generate' and commit the result."
             exit 1
           fi
+
+      # Covers the FFI boundary: scan-range bounds, pool decoding, mnemonic
+      # handling. Runs after the staleness check so a stale-bindings failure is
+      # not masked by a compile error.
+      - name: tests (dart bindings)
+        working-directory: dart/rust
+        run: cargo test
 
       - name: flutter analyze
         working-directory: dart
