@@ -288,7 +288,7 @@ impl SseDecode for crate::api::types::FfiPool {
         let mut var_rawJson = <String>::sse_decode(deserializer);
         let mut var_denominationSat = <u64>::sse_decode(deserializer);
         let mut var_peers = <u32>::sse_decode(deserializer);
-        let mut var_timeout = <u64>::sse_decode(deserializer);
+        let mut var_expiresAtUnixSec = <u64>::sse_decode(deserializer);
         let mut var_relay = <String>::sse_decode(deserializer);
         let mut var_feeRate = <u32>::sse_decode(deserializer);
         let mut var_publicKey = <String>::sse_decode(deserializer);
@@ -298,7 +298,7 @@ impl SseDecode for crate::api::types::FfiPool {
             raw_json: var_rawJson,
             denomination_sat: var_denominationSat,
             peers: var_peers,
-            timeout: var_timeout,
+            expires_at_unix_sec: var_expiresAtUnixSec,
             relay: var_relay,
             fee_rate: var_feeRate,
             public_key: var_publicKey,
@@ -540,7 +540,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::FfiPool {
             self.raw_json.into_into_dart().into_dart(),
             self.denomination_sat.into_into_dart().into_dart(),
             self.peers.into_into_dart().into_dart(),
-            self.timeout.into_into_dart().into_dart(),
+            self.expires_at_unix_sec.into_into_dart().into_dart(),
             self.relay.into_into_dart().into_dart(),
             self.fee_rate.into_into_dart().into_dart(),
             self.public_key.into_into_dart().into_dart(),
@@ -662,7 +662,7 @@ impl SseEncode for crate::api::types::FfiPool {
         <String>::sse_encode(self.raw_json, serializer);
         <u64>::sse_encode(self.denomination_sat, serializer);
         <u32>::sse_encode(self.peers, serializer);
-        <u64>::sse_encode(self.timeout, serializer);
+        <u64>::sse_encode(self.expires_at_unix_sec, serializer);
         <String>::sse_encode(self.relay, serializer);
         <u32>::sse_encode(self.fee_rate, serializer);
         <String>::sse_encode(self.public_key, serializer);
@@ -863,7 +863,7 @@ mod io {
                 raw_json: self.raw_json.cst_decode(),
                 denomination_sat: self.denomination_sat.cst_decode(),
                 peers: self.peers.cst_decode(),
-                timeout: self.timeout.cst_decode(),
+                expires_at_unix_sec: self.expires_at_unix_sec.cst_decode(),
                 relay: self.relay.cst_decode(),
                 fee_rate: self.fee_rate.cst_decode(),
                 public_key: self.public_key.cst_decode(),
@@ -963,7 +963,7 @@ mod io {
                 raw_json: core::ptr::null_mut(),
                 denomination_sat: Default::default(),
                 peers: Default::default(),
-                timeout: Default::default(),
+                expires_at_unix_sec: Default::default(),
                 relay: core::ptr::null_mut(),
                 fee_rate: Default::default(),
                 public_key: core::ptr::null_mut(),
@@ -1143,7 +1143,7 @@ mod io {
         raw_json: *mut wire_cst_list_prim_u_8_strict,
         denomination_sat: u64,
         peers: u32,
-        timeout: u64,
+        expires_at_unix_sec: u64,
         relay: *mut wire_cst_list_prim_u_8_strict,
         fee_rate: u32,
         public_key: *mut wire_cst_list_prim_u_8_strict,

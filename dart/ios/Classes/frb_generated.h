@@ -57,7 +57,7 @@ typedef struct wire_cst_ffi_pool {
   struct wire_cst_list_prim_u_8_strict *raw_json;
   uint64_t denomination_sat;
   uint32_t peers;
-  uint64_t timeout;
+  uint64_t expires_at_unix_sec;
   struct wire_cst_list_prim_u_8_strict *relay;
   uint32_t fee_rate;
   struct wire_cst_list_prim_u_8_strict *public_key;

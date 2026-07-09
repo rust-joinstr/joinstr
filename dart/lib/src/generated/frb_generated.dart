@@ -314,7 +314,7 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
       rawJson: dco_decode_String(arr[1]),
       denominationSat: dco_decode_u_64(arr[2]),
       peers: dco_decode_u_32(arr[3]),
-      timeout: dco_decode_u_64(arr[4]),
+      expiresAtUnixSec: dco_decode_u_64(arr[4]),
       relay: dco_decode_String(arr[5]),
       feeRate: dco_decode_u_32(arr[6]),
       publicKey: dco_decode_String(arr[7]),
@@ -495,7 +495,7 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
     var var_rawJson = sse_decode_String(deserializer);
     var var_denominationSat = sse_decode_u_64(deserializer);
     var var_peers = sse_decode_u_32(deserializer);
-    var var_timeout = sse_decode_u_64(deserializer);
+    var var_expiresAtUnixSec = sse_decode_u_64(deserializer);
     var var_relay = sse_decode_String(deserializer);
     var var_feeRate = sse_decode_u_32(deserializer);
     var var_publicKey = sse_decode_String(deserializer);
@@ -505,7 +505,7 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
         rawJson: var_rawJson,
         denominationSat: var_denominationSat,
         peers: var_peers,
-        timeout: var_timeout,
+        expiresAtUnixSec: var_expiresAtUnixSec,
         relay: var_relay,
         feeRate: var_feeRate,
         publicKey: var_publicKey,
@@ -731,7 +731,7 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
     sse_encode_String(self.rawJson, serializer);
     sse_encode_u_64(self.denominationSat, serializer);
     sse_encode_u_32(self.peers, serializer);
-    sse_encode_u_64(self.timeout, serializer);
+    sse_encode_u_64(self.expiresAtUnixSec, serializer);
     sse_encode_String(self.relay, serializer);
     sse_encode_u_32(self.feeRate, serializer);
     sse_encode_String(self.publicKey, serializer);

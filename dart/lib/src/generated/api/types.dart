@@ -131,8 +131,9 @@ class FfiPool {
   final BigInt denominationSat;
   final int peers;
 
-  /// Pool timeout / max duration, in seconds.
-  final BigInt timeout;
+  /// When the pool expires, as a unix timestamp in seconds. Pool events carry
+  /// an absolute instant (`now + max_duration`), never a duration.
+  final BigInt expiresAtUnixSec;
   final String relay;
 
   /// Fixed fee rate in satoshis per vByte (0 when delegated to a provider).
@@ -147,7 +148,7 @@ class FfiPool {
     required this.rawJson,
     required this.denominationSat,
     required this.peers,
-    required this.timeout,
+    required this.expiresAtUnixSec,
     required this.relay,
     required this.feeRate,
     required this.publicKey,
@@ -160,7 +161,7 @@ class FfiPool {
       rawJson.hashCode ^
       denominationSat.hashCode ^
       peers.hashCode ^
-      timeout.hashCode ^
+      expiresAtUnixSec.hashCode ^
       relay.hashCode ^
       feeRate.hashCode ^
       publicKey.hashCode ^
@@ -175,7 +176,7 @@ class FfiPool {
           rawJson == other.rawJson &&
           denominationSat == other.denominationSat &&
           peers == other.peers &&
-          timeout == other.timeout &&
+          expiresAtUnixSec == other.expiresAtUnixSec &&
           relay == other.relay &&
           feeRate == other.feeRate &&
           publicKey == other.publicKey &&

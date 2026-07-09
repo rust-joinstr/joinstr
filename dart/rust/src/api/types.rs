@@ -172,8 +172,9 @@ pub struct FfiPool {
     /// Denomination of each output, in satoshis.
     pub denomination_sat: u64,
     pub peers: u32,
-    /// Pool timeout / max duration, in seconds.
-    pub timeout: u64,
+    /// When the pool expires, as a unix timestamp in seconds. Pool events carry
+    /// an absolute instant (`now + max_duration`), never a duration.
+    pub expires_at_unix_sec: u64,
     pub relay: String,
     /// Fixed fee rate in satoshis per vByte (0 when delegated to a provider).
     pub fee_rate: u32,
@@ -202,10 +203,19 @@ impl FfiPool {
 
         let denomination_sat = payload.denomination.to_sat();
         let peers = payload.peers as u32;
-        let timeout = match payload.timeout {
+        // Only `Simple` carries an absolute expiry; `Fixed` and `Timeout` carry
+        // a `max_duration`. Rather than collapse both units into one field,
+        // refuse them: `Joinstr::new_peer_with_electrum` rejects every non-`Simple`
+        // timeline with `TimelineNotImplemented`, so such a pool can never be
+        // joined and must not be listed as though it could be.
+        let expires_at_unix_sec = match payload.timeout {
             Timeline::Simple(t) => t,
-            Timeline::Fixed { max_duration, .. } => max_duration,
-            Timeline::Timeout { max_duration, .. } => max_duration,
+            _ => {
+                return Err(JoinstrError::new(format!(
+                    "pool {} uses a timeline this version cannot join",
+                    pool.id
+                )))
+            }
         };
         let relay = payload.relay.clone();
         let fee_rate = match &payload.fee {
@@ -218,7 +228,7 @@ impl FfiPool {
             raw_json,
             denomination_sat,
             peers,
-            timeout,
+            expires_at_unix_sec,
             relay,
             fee_rate,
             public_key: pool.public_key.to_string(),
@@ -263,29 +273,41 @@ mod tests {
         }
     }
 
+    /// `Simple` carries an absolute unix timestamp, matching what the Electrum
+    /// plugin writes (`int(time.time()) + timeout`) and what `Pool::create`
+    /// builds. It is surfaced verbatim, not reinterpreted as a duration.
     #[test]
-    fn timeline_variants_all_map_to_max_duration() {
-        let cases = [
-            (Timeline::Simple(300), 300),
-            (
-                Timeline::Fixed {
-                    start: 10,
-                    max_duration: 600,
-                },
-                600,
-            ),
-            (
-                Timeline::Timeout {
-                    timeout: 20,
-                    max_duration: 900,
-                },
-                900,
-            ),
-        ];
-        for (timeline, expected) in cases {
+    fn simple_timeline_is_surfaced_as_an_absolute_expiry() {
+        let expiry = 1_793_500_000;
+        let pool = pool_with(Some(payload_with(Timeline::Simple(expiry), Fee::Fixed(1))));
+        assert_eq!(
+            FfiPool::from_pool(&pool).unwrap().expires_at_unix_sec,
+            expiry
+        );
+    }
+
+    /// `Joinstr::new_peer_with_electrum` rejects every non-`Simple` timeline
+    /// with `TimelineNotImplemented`, so listing such a pool would offer the
+    /// user a join that cannot succeed.
+    #[test]
+    fn unjoinable_timelines_are_refused_rather_than_listed() {
+        for timeline in [
+            Timeline::Fixed {
+                start: 10,
+                max_duration: 600,
+            },
+            Timeline::Timeout {
+                timeout: 20,
+                max_duration: 900,
+            },
+        ] {
             let pool = pool_with(Some(payload_with(timeline, Fee::Fixed(1))));
-            let ffi = FfiPool::from_pool(&pool).unwrap();
-            assert_eq!(ffi.timeout, expected, "timeline {timeline:?}");
+            let err = FfiPool::from_pool(&pool).err().unwrap();
+            assert!(
+                err.message.contains("cannot join"),
+                "timeline {timeline:?}: {}",
+                err.message
+            );
         }
     }
 
