@@ -12,12 +12,21 @@ env:
   # A mismatched codegen binary produces a spurious diff in the bindings check.
   FRB_VERSION: 2.12.0
 
+# Every job here only reads the repo and runs checks. Nothing pushes, comments,
+# or publishes, so the default read/write GITHUB_TOKEN is more than any step needs.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
       # Pinned so a new clippy release cannot turn CI red on an unrelated PR.
       # Bump deliberately, and fix the new lints in that same commit.
       - uses: dtolnay/rust-toolchain@1.96.0
@@ -42,6 +51,10 @@ jobs:
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: tests
@@ -54,6 +67,10 @@ jobs:
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: build
@@ -72,6 +89,10 @@ jobs:
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
           # codegen shells out to rustfmt for frb_generated.rs and silently
