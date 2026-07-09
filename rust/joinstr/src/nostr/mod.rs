@@ -157,6 +157,39 @@ mod serde_relay {
     }
 }
 
+mod serde_version {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(version: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match version {
+            Some(v) => serializer.serialize_str(v),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(s) => Ok(Some(s)),
+            // NIP.md publishes this field as `"versions": ["1"]`. Take the first
+            // string entry; a bare `version` string is accepted too.
+            serde_json::Value::Array(arr) => {
+                Ok(arr.into_iter().find_map(|v| v.as_str().map(str::to_string)))
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "version must be a string or an array of strings, got {other}"
+            ))),
+        }
+    }
+}
+
 mod serde_transport {
     use super::{Tor, Transport, Vpn};
     use serde::{self, Deserialize, Deserializer, Serializer};
@@ -229,6 +262,7 @@ pub struct Pool {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default = "default_version")]
     #[serde(alias = "versions")]
+    #[serde(with = "serde_version")]
     pub version: Option<String>,
     pub id: String,
     #[serde(default = "default_network")]
@@ -1342,6 +1376,32 @@ pub mod tests {
         assert_eq!(payload.peers, 2);
         assert_eq!(payload.relay, "ws://127.0.0.1:34889");
         assert_eq!(payload.fee, Fee::Fixed(10));
+    }
+
+    /// NIP.md's `kind:2022` example publishes `"versions": ["1"]`. Decoding it as
+    /// a bare string used to fail the whole `Pool`, which `receive_pool_notification`
+    /// turned into a `None` that truncated the caller's listing loop.
+    #[test]
+    fn pool_versions_array_from_nip_decodes() {
+        let raw = r#"{
+            "versions": ["1"],
+            "id": "e37076afaf4a0054fd144f0b843c174173e7d0620a572572c0a34e6b78023afe",
+            "type": "create",
+            "public_key": "8f09f051d2a699bfd9fc289b7edb49cda50768067181df23735f3e921955001b",
+            "denomination": 1000000,
+            "peers": 2,
+            "timeout": 1731808735,
+            "relays": ["ws://127.0.0.1:34889"],
+            "fee_rate": 10,
+            "transport": { "vpn": { "enable": false }, "tor": { "enable": false } }
+        }"#;
+        let pool: Pool = serde_json::from_str(raw).unwrap();
+        assert_eq!(pool.version, Some("1".into()));
+        assert!(pool.payload.is_some());
+
+        // A legacy `["0"]` array decodes too, rather than failing the parse.
+        let pool: Pool = serde_json::from_str(&raw.replace(r#"["1"]"#, r#"["0"]"#)).unwrap();
+        assert_eq!(pool.version, Some("0".into()));
     }
 
     #[test]

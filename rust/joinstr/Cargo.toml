@@ -27,6 +27,7 @@ rand = { workspace = true }
 simple_nostr_client = { workspace = true }
 simple_electrum_client = { workspace = true }
 native-tls = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 electrsd = { git = "https://github.com/pythcoiner/electrsd.git", branch = "buffered_logs"}

@@ -35,6 +35,7 @@ simple_electrum_client = { path = "rust/simple_electrum_client" }
 simple_nostr_client = { path = "rust/simple_nostr_client" }
 tokio = "1.40.0"
 websocket = { version = "0.27.1", default-features = false }
+zeroize = "1"
 
 [patch."https://github.com/pythcoiner/joinstr"]
 base64ct = "=1.6.0"

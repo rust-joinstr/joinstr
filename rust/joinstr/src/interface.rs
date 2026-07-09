@@ -3,6 +3,7 @@ use std::{fmt::Display, thread::sleep, time::Duration};
 use bip39::Mnemonic;
 use bitcoin::{address::NetworkUnchecked, Address, Network, Txid};
 use simple_nostr_client::nostr::Keys;
+use zeroize::Zeroizing;
 
 use crate::{
     electrum::Client,
@@ -136,8 +137,10 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
     .simple_timeout(now() + config.max_duration)?
     .min_peers(config.peers)?;
 
-    let mut signer =
-        WpkhHotSigner::new_from_mnemonics(config.network, &peer.mnemonics.to_string())?;
+    // `Mnemonic::to_string` renders the seed into a fresh `String`; wipe it
+    // rather than leaving it in freed heap.
+    let mnemonics = Zeroizing::new(peer.mnemonics.to_string());
+    let mut signer = WpkhHotSigner::new_from_mnemonics(config.network, &mnemonics)?;
     let client = Client::new(&url, port)?;
     signer.set_client(client);
 
@@ -203,7 +206,9 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
         "peer",
     )?;
 
-    let mut signer = WpkhHotSigner::new_from_mnemonics(peer.network, &peer.mnemonics.to_string())?;
+    // As in `initiate_coinjoin`: wipe the rendered copy of the seed.
+    let mnemonics = Zeroizing::new(peer.mnemonics.to_string());
+    let mut signer = WpkhHotSigner::new_from_mnemonics(peer.network, &mnemonics)?;
     let client = Client::new(&url, port)?;
     signer.set_client(client);
 
