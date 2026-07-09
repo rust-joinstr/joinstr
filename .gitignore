@@ -4,3 +4,8 @@
 /rust/simple_electrum_client/Cargo.lock
 /rust/joinstr_wallet/include
 Cargo.lock
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
