@@ -20,6 +20,9 @@ pub enum Error {
     Joinstr(crate::joinstr::Error),
     Signer(crate::signer::Error),
     Electrum(crate::electrum::Error),
+    /// The coinjoin ended without a final transaction: the pool timed out
+    /// before enough peers registered, or a peer aborted.
+    CoinjoinNotFinalized,
 }
 
 impl From<crate::nostr::error::Error> for Error {
@@ -61,6 +64,9 @@ impl Display for Error {
             Error::Joinstr(e) => write!(f, "Joinstr error: {:?}", e),
             Error::Signer(e) => write!(f, "Signer error: {:?}", e),
             Error::Electrum(e) => write!(f, "Electrum error: {:?}", e),
+            Error::CoinjoinNotFinalized => {
+                write!(f, "Coinjoin did not produce a final transaction")
+            }
         }
     }
 }
@@ -145,7 +151,7 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
 
     let txid = initiator
         .final_tx()
-        .expect("coinjoin success")
+        .ok_or(Error::CoinjoinNotFinalized)?
         .compute_txid();
 
     Ok(txid)
@@ -155,7 +161,7 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
 ///
 /// # Arguments
 /// * `back` - how many second back look in the past
-/// * `timeout` - how many milliseconds we will wait before fetching relay notifications
+/// * `timeout` - how many microseconds we will wait before fetching relay notifications
 /// * `relay` - the relay url, must start w/ `wss://` or `ws://`
 ///
 /// # Returns a [`Vec`]  of [`String`] containing a json serialization of a [`Pool`]
@@ -164,9 +170,9 @@ pub fn list_pools(back: u64, timeout: u64, relay: String) -> Result<Vec<Pool>, E
     let mut pool_listener = NostrClient::new("pool_listener")
         .relay(relay)?
         .keys(Keys::generate())?;
-    pool_listener.connect_nostr().unwrap();
-    // subscribe to 2020 event up to 1 day back in time
-    pool_listener.subscribe_pools(back).unwrap();
+    pool_listener.connect_nostr()?;
+    // subscribe to kind:2022 pool events published within the last `back` seconds
+    pool_listener.subscribe_pools(back)?;
 
     sleep(Duration::from_micros(timeout));
 
@@ -205,7 +211,7 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
 
     let txid = joinstr_peer
         .final_tx()
-        .expect("coinjoin success")
+        .ok_or(Error::CoinjoinNotFinalized)?
         .compute_txid()
         .to_string();
 

@@ -97,7 +97,9 @@ impl TryFrom<FfiCoin> for Coin {
 pub struct FfiPoolConfig {
     /// Denomination of each output, in BTC.
     pub denomination_btc: f64,
-    /// Mining fee contributed, in satoshis.
+    /// Fee rate, in satoshis per vByte. Each output is reduced by `fee * 100`
+    /// satoshis, 100 vB being the assumed weight of one participant's
+    /// input+output pair.
     pub fee: u32,
     /// Seconds to wait for the pool to fill.
     pub max_duration: u64,
@@ -122,7 +124,8 @@ impl From<FfiPoolConfig> for PoolConfig {
 pub struct FfiPeerConfig {
     /// BIP39 mnemonic of the wallet that owns `input` and will sign.
     pub mnemonic: String,
-    /// Electrum server hostname / IP (no scheme, no port).
+    /// Electrum server hostname / IP, without a port. Prefix with `ssl://` to
+    /// negotiate TLS; anything else connects in plaintext.
     pub electrum_address: String,
     pub electrum_port: u16,
     /// The coin spent into the coinjoin (e.g. from `list_coins`).
@@ -184,7 +187,7 @@ pub struct FfiPool {
     /// Pool timeout / max duration, in seconds.
     pub timeout: u64,
     pub relay: String,
-    /// Fixed fee in satoshis (0 when delegated to a provider).
+    /// Fixed fee rate in satoshis per vByte (0 when delegated to a provider).
     pub fee_rate: u32,
     /// Initiator's nostr public key, as hex.
     pub public_key: String,
