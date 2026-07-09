@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Must match `flutter_rust_bridge` in dart/rust/Cargo.toml and dart/pubspec.yaml.
+  # A mismatched codegen binary produces a spurious diff in the bindings check.
+  FRB_VERSION: 2.12.0
 
 jobs:
   lint:
@@ -15,7 +18,9 @@ jobs:
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      # Pinned so a new clippy release cannot turn CI red on an unrelated PR.
+      # Bump deliberately, and fix the new lints in that same commit.
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -23,6 +28,14 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # dart/rust sets its own `[workspace]`, so it is invisible to the
+      # --workspace commands above and needs its own invocation.
+      - name: rustfmt (dart bindings)
+        working-directory: dart/rust
+        run: cargo fmt -- --check
+      - name: clippy (dart bindings)
+        working-directory: dart/rust
+        run: cargo clippy --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -35,6 +48,11 @@ jobs:
         run: cargo test --workspace --lib
       - name: doctests
         run: cargo test --workspace --doc
+      # Separate workspace (see lint job); its unit tests cover the FFI
+      # boundary: scan-range bounds, pool decoding, mnemonic handling.
+      - name: tests (dart bindings)
+        working-directory: dart/rust
+        run: cargo test
 
   build:
     runs-on: ubuntu-latest
@@ -45,3 +63,53 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build
         run: cargo build --release
+
+  bindings:
+    # The flutter_rust_bridge output under dart/lib/src/generated and
+    # dart/rust/src/frb_generated.rs is committed. Regenerate it and fail if it
+    # differs, so a change to dart/rust/src/api can never land with stale
+    # bindings (which breaks the build only once someone runs codegen).
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache codegen binary
+        id: cache-frb
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/flutter_rust_bridge_codegen
+          key: frb-codegen-${{ env.FRB_VERSION }}-${{ runner.os }}
+      - name: Install codegen
+        if: steps.cache-frb.outputs.cache-hit != 'true'
+        run: cargo install flutter_rust_bridge_codegen --version ${{ env.FRB_VERSION }} --locked
+
+      - name: flutter pub get
+        working-directory: dart
+        run: flutter pub get
+      - name: Regenerate bindings
+        working-directory: dart
+        run: flutter_rust_bridge_codegen generate
+      - name: Fail if committed bindings are stale
+        run: |
+          if ! git diff --exit-code -- \
+            dart/lib/src/generated \
+            dart/rust/src/frb_generated.rs \
+            dart/ios/Classes/frb_generated.h; then
+            echo "::error::Committed flutter_rust_bridge output is stale."
+            echo "Run 'cd dart && flutter_rust_bridge_codegen generate' and commit the result."
+            exit 1
+          fi
+
+      - name: flutter analyze
+        working-directory: dart
+        run: flutter analyze
+      - name: flutter analyze (example)
+        working-directory: dart/example
+        run: flutter pub get && flutter analyze
