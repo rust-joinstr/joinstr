@@ -21,7 +21,11 @@ class _ExampleAppState extends State<ExampleApp> {
 
   Future<void> _refresh() async {
     try {
-      final pools = await listPools(back: 86400, timeout: 5000000, relay: _relay);
+      final pools = await listPools(
+        back: BigInt.from(86400),
+        timeout: BigInt.from(5000000),
+        relay: _relay,
+      );
       if (!mounted) return;
       setState(() {
         _pools = pools;
