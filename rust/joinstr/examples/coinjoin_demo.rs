@@ -56,8 +56,8 @@ fn main() {
 
     // discover two funded inputs in the protocol's accepted range
     let (min, max) = (denom_sats + 500, denom_sats + 5000);
-    let coins = list_coins(mnemonic.clone(), host.to_string(), port, (0, 10), network)
-        .expect("list_coins failed");
+    let coins =
+        list_coins(&mnemonic, host.to_string(), port, (0, 10), network).expect("list_coins failed");
     let mut usable: Vec<_> = coins
         .into_iter()
         .filter(|c| (min..=max).contains(&c.txout.value.to_sat()))

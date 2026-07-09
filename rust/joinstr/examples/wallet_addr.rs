@@ -33,7 +33,7 @@ fn main() {
             .rsplit_once(':')
             .expect("ELECTRUM must be host:port");
         let coins = list_coins(
-            mnemonic,
+            &mnemonic,
             host.to_string(),
             port.parse().expect("bad port"),
             (0, count),

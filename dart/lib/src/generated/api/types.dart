@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `from_pool`, `native_network`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `try_from`, `try_from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `try_from`, `try_from`
 
 enum BitcoinNetwork {
   bitcoin,
@@ -118,13 +118,14 @@ class FfiPeerConfig {
 /// A coinjoin pool advertised on a nostr relay.
 ///
 /// Pass `raw_json` back to `join_coinjoin` to join; the other fields are decoded
-/// for display.
+/// for display. There is deliberately no `network` field: pool events do not
+/// carry one, so it cannot be known here. The caller supplies the network when
+/// joining, via `FfiPeerConfig::network`.
 class FfiPool {
   final String id;
 
   /// Canonical JSON; pass back to `join_coinjoin`.
   final String rawJson;
-  final BitcoinNetwork network;
 
   /// Denomination of each output, in satoshis.
   final BigInt denominationSat;
@@ -144,7 +145,6 @@ class FfiPool {
   const FfiPool({
     required this.id,
     required this.rawJson,
-    required this.network,
     required this.denominationSat,
     required this.peers,
     required this.timeout,
@@ -158,7 +158,6 @@ class FfiPool {
   int get hashCode =>
       id.hashCode ^
       rawJson.hashCode ^
-      network.hashCode ^
       denominationSat.hashCode ^
       peers.hashCode ^
       timeout.hashCode ^
@@ -174,7 +173,6 @@ class FfiPool {
           runtimeType == other.runtimeType &&
           id == other.id &&
           rawJson == other.rawJson &&
-          network == other.network &&
           denominationSat == other.denominationSat &&
           peers == other.peers &&
           timeout == other.timeout &&

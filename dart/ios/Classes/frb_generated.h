@@ -55,7 +55,6 @@ typedef struct wire_cst_list_ffi_coin {
 typedef struct wire_cst_ffi_pool {
   struct wire_cst_list_prim_u_8_strict *id;
   struct wire_cst_list_prim_u_8_strict *raw_json;
-  int32_t network;
   uint64_t denomination_sat;
   uint32_t peers;
   uint64_t timeout;

@@ -94,13 +94,13 @@ pub struct PeerConfig {
 // the electrum notification mechanism and let consumer poll our
 // static/cached state
 pub fn list_coins(
-    mnemonics: String,
+    mnemonics: &str,
     electrum_address: String,
     electrum_port: u16,
     range: (u32, u32),
     network: Network,
 ) -> Result<Vec<Coin>, Error> {
-    let mut signer = WpkhHotSigner::new_from_mnemonics(network, &mnemonics)?;
+    let mut signer = WpkhHotSigner::new_from_mnemonics(network, mnemonics)?;
     let client = Client::new(&electrum_address, electrum_port)?;
     signer.set_client(client);
 

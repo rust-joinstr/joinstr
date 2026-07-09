@@ -286,7 +286,6 @@ impl SseDecode for crate::api::types::FfiPool {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_id = <String>::sse_decode(deserializer);
         let mut var_rawJson = <String>::sse_decode(deserializer);
-        let mut var_network = <crate::api::types::BitcoinNetwork>::sse_decode(deserializer);
         let mut var_denominationSat = <u64>::sse_decode(deserializer);
         let mut var_peers = <u32>::sse_decode(deserializer);
         let mut var_timeout = <u64>::sse_decode(deserializer);
@@ -297,7 +296,6 @@ impl SseDecode for crate::api::types::FfiPool {
         return crate::api::types::FfiPool {
             id: var_id,
             raw_json: var_rawJson,
-            network: var_network,
             denomination_sat: var_denominationSat,
             peers: var_peers,
             timeout: var_timeout,
@@ -540,7 +538,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::FfiPool {
         [
             self.id.into_into_dart().into_dart(),
             self.raw_json.into_into_dart().into_dart(),
-            self.network.into_into_dart().into_dart(),
             self.denomination_sat.into_into_dart().into_dart(),
             self.peers.into_into_dart().into_dart(),
             self.timeout.into_into_dart().into_dart(),
@@ -663,7 +660,6 @@ impl SseEncode for crate::api::types::FfiPool {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.id, serializer);
         <String>::sse_encode(self.raw_json, serializer);
-        <crate::api::types::BitcoinNetwork>::sse_encode(self.network, serializer);
         <u64>::sse_encode(self.denomination_sat, serializer);
         <u32>::sse_encode(self.peers, serializer);
         <u64>::sse_encode(self.timeout, serializer);
@@ -865,7 +861,6 @@ mod io {
             crate::api::types::FfiPool {
                 id: self.id.cst_decode(),
                 raw_json: self.raw_json.cst_decode(),
-                network: self.network.cst_decode(),
                 denomination_sat: self.denomination_sat.cst_decode(),
                 peers: self.peers.cst_decode(),
                 timeout: self.timeout.cst_decode(),
@@ -966,7 +961,6 @@ mod io {
             Self {
                 id: core::ptr::null_mut(),
                 raw_json: core::ptr::null_mut(),
-                network: Default::default(),
                 denomination_sat: Default::default(),
                 peers: Default::default(),
                 timeout: Default::default(),
@@ -1147,7 +1141,6 @@ mod io {
     pub struct wire_cst_ffi_pool {
         id: *mut wire_cst_list_prim_u_8_strict,
         raw_json: *mut wire_cst_list_prim_u_8_strict,
-        network: i32,
         denomination_sat: u64,
         peers: u32,
         timeout: u64,

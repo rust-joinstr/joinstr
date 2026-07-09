@@ -78,7 +78,7 @@ fn main() {
 
     // 2. Select a confirmed UTXO from our wallet within the accepted input range.
     let coins = list_coins(
-        mnemonic.clone(),
+        &mnemonic,
         electrum_host.clone(),
         electrum_port,
         (0, 50),

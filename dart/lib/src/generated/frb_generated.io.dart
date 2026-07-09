@@ -274,7 +274,6 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
       FfiPool apiObj, wire_cst_ffi_pool wireObj) {
     wireObj.id = cst_encode_String(apiObj.id);
     wireObj.raw_json = cst_encode_String(apiObj.rawJson);
-    wireObj.network = cst_encode_bitcoin_network(apiObj.network);
     wireObj.denomination_sat = cst_encode_u_64(apiObj.denominationSat);
     wireObj.peers = cst_encode_u_32(apiObj.peers);
     wireObj.timeout = cst_encode_u_64(apiObj.timeout);
@@ -718,9 +717,6 @@ final class wire_cst_ffi_pool extends ffi.Struct {
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> id;
 
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> raw_json;
-
-  @ffi.Int32()
-  external int network;
 
   @ffi.Uint64()
   external int denomination_sat;

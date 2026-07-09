@@ -8,6 +8,8 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'types.dart';
 
+// These functions are ignored because they are not marked as `pub`: `check_scan_range`
+
 /// List spendable coins by scanning electrum over derivation indexes
 /// `[range_start, range_end)` on both the receive and change branches.
 Future<List<FfiCoin>> listCoins(
@@ -27,6 +29,9 @@ Future<List<FfiCoin>> listCoins(
 
 /// List coinjoin pools advertised on `relay` (`wss://`/`ws://`) within the last
 /// `back` seconds, waiting `timeout` microseconds for relay notifications.
+///
+/// A relay carries pools from every client; one this version cannot decode is
+/// skipped, not surfaced as a placeholder and not allowed to fail the listing.
 Future<List<FfiPool>> listPools(
         {required BigInt back,
         required BigInt timeout,
