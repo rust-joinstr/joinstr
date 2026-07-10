@@ -1,5 +1,10 @@
 plugins {
     id("com.android.application")
+    // Declared explicitly rather than relying on the Flutter Gradle Plugin to
+    // auto-apply it: `builtInKotlin=false` in gradle.properties disables that,
+    // and without KGP the `kotlin {}` block below does not exist and Gradle
+    // fails at configuration time.
+    id("org.jetbrains.kotlin.android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }

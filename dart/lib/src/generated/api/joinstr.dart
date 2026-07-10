@@ -8,10 +8,11 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'types.dart';
 
-// These functions are ignored because they are not marked as `pub`: `check_scan_range`
-
 /// List spendable coins by scanning electrum over derivation indexes
 /// `[range_start, range_end)` on both the receive and change branches.
+///
+/// The range is bounded by `interface::check_scan_range`, so every binding
+/// shares one guard rather than each re-implementing it.
 Future<List<FfiCoin>> listCoins(
         {required String mnemonic,
         required String electrumAddress,

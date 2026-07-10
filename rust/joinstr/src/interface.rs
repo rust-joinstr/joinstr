@@ -24,7 +24,26 @@ pub enum Error {
     /// The coinjoin ended without a final transaction: the pool timed out
     /// before enough peers registered, or a peer aborted.
     CoinjoinNotFinalized,
+    /// `list_coins` was given a range whose end precedes its start.
+    InvertedScanRange {
+        start: u32,
+        end: u32,
+    },
+    /// `list_coins` was given a range spanning more than [`MAX_SCAN_SPAN`].
+    ScanRangeTooLarge {
+        span: u32,
+        max: u32,
+    },
+    /// `now() + max_duration` does not fit in a u64 unix timestamp.
+    PoolDurationOverflow {
+        max_duration: u64,
+    },
 }
+
+/// Upper bound on the number of derivation indexes a single [`list_coins`] call
+/// may scan. Each index issues two synchronous electrum queries, so an
+/// unbounded span (e.g. `0..u32::MAX`) would hang the caller indefinitely.
+pub const MAX_SCAN_SPAN: u32 = 100_000;
 
 impl From<crate::nostr::error::Error> for Error {
     fn from(value: crate::nostr::error::Error) -> Self {
@@ -68,6 +87,15 @@ impl Display for Error {
             Error::CoinjoinNotFinalized => {
                 write!(f, "Coinjoin did not produce a final transaction")
             }
+            Error::InvertedScanRange { start, end } => {
+                write!(f, "invalid range: end {end} is before start {start}")
+            }
+            Error::ScanRangeTooLarge { span, max } => {
+                write!(f, "range span {span} exceeds maximum {max}")
+            }
+            Error::PoolDurationOverflow { max_duration } => {
+                write!(f, "max_duration {max_duration} overflows the pool expiry")
+            }
         }
     }
 }
@@ -90,6 +118,24 @@ pub struct PeerConfig {
     pub network: Network,
 }
 
+/// Reject inverted and oversized scan ranges before they reach electrum.
+///
+/// An inverted range would otherwise iterate zero times below and return an
+/// empty `Vec`, reporting "you have no coins" rather than a bad argument.
+pub fn check_scan_range(range: (u32, u32)) -> Result<(), Error> {
+    let (start, end) = range;
+    if end < start {
+        return Err(Error::InvertedScanRange { start, end });
+    }
+    if end - start > MAX_SCAN_SPAN {
+        return Err(Error::ScanRangeTooLarge {
+            span: end - start,
+            max: MAX_SCAN_SPAN,
+        });
+    }
+    Ok(())
+}
+
 /// List available coins
 // FIXME: this function is a ugly+ineficient hack, we should use
 // the electrum notification mechanism and let consumer poll our
@@ -101,6 +147,7 @@ pub fn list_coins(
     range: (u32, u32),
     network: Network,
 ) -> Result<Vec<Coin>, Error> {
+    check_scan_range(range)?;
     let mut signer = WpkhHotSigner::new_from_mnemonics(network, mnemonics)?;
     let client = Client::new(&electrum_address, electrum_port)?;
     signer.set_client(client);
@@ -124,6 +171,15 @@ pub fn list_coins(
 /// * `peer` - information about the peer
 ///
 pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, Error> {
+    // `max_duration` arrives unvalidated from the bindings. An unchecked add
+    // panics in debug and wraps to a past timestamp in release, creating a pool
+    // that is born expired.
+    let expiry = now()
+        .checked_add(config.max_duration)
+        .ok_or(Error::PoolDurationOverflow {
+            max_duration: config.max_duration,
+        })?;
+
     let (url, port) = (peer.electrum_address, peer.electrum_port);
     let mut initiator = Joinstr::new_initiator(
         Keys::generate(),
@@ -134,7 +190,7 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
     )?
     .denomination(config.denomination)?
     .fee(config.fee)?
-    .simple_timeout(now() + config.max_duration)?
+    .simple_timeout(expiry)?
     .min_peers(config.peers)?;
 
     // `Mnemonic::to_string` renders the seed into a fresh `String`; wipe it
@@ -221,4 +277,36 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
         .to_string();
 
     Ok(txid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err_string(range: (u32, u32)) -> String {
+        check_scan_range(range).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn scan_range_accepts_empty_and_max_span() {
+        assert!(check_scan_range((0, 0)).is_ok());
+        assert!(check_scan_range((5, 6)).is_ok());
+        assert!(check_scan_range((0, MAX_SCAN_SPAN)).is_ok());
+        // The bound is on the span, not on the absolute indexes.
+        assert!(check_scan_range((u32::MAX - MAX_SCAN_SPAN, u32::MAX)).is_ok());
+    }
+
+    #[test]
+    fn scan_range_rejects_span_over_max() {
+        assert!(err_string((0, MAX_SCAN_SPAN + 1)).contains("exceeds maximum"));
+    }
+
+    /// An inverted range must be rejected before the span subtraction, which
+    /// would otherwise underflow (panic in debug, wrap in release), and before
+    /// the scan loop, which would iterate zero times and report "no coins".
+    #[test]
+    fn scan_range_rejects_inverted_range() {
+        assert!(err_string((10, 9)).contains("is before start"));
+        assert!(err_string((u32::MAX, 0)).contains("is before start"));
+    }
 }

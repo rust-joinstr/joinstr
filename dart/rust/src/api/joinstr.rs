@@ -10,29 +10,11 @@ use zeroize::Zeroizing;
 use crate::api::error::JoinstrError;
 use crate::api::types::{BitcoinNetwork, FfiCoin, FfiPeerConfig, FfiPool, FfiPoolConfig};
 
-/// Upper bound on the number of derivation indexes a single `list_coins` call
-/// may scan. Each index issues two synchronous electrum queries, so an
-/// unbounded span (e.g. `0..u32::MAX`) would hang the caller indefinitely.
-const MAX_SCAN_SPAN: u32 = 100_000;
-
-/// Reject inverted and oversized scan ranges before they reach electrum.
-fn check_scan_range(range_start: u32, range_end: u32) -> Result<(), JoinstrError> {
-    if range_end < range_start {
-        return Err(JoinstrError::new(format!(
-            "invalid range: end {range_end} is before start {range_start}"
-        )));
-    }
-    if range_end - range_start > MAX_SCAN_SPAN {
-        return Err(JoinstrError::new(format!(
-            "range span {} exceeds maximum {MAX_SCAN_SPAN}",
-            range_end - range_start
-        )));
-    }
-    Ok(())
-}
-
 /// List spendable coins by scanning electrum over derivation indexes
 /// `[range_start, range_end)` on both the receive and change branches.
+///
+/// The range is bounded by `interface::check_scan_range`, so every binding
+/// shares one guard rather than each re-implementing it.
 pub fn list_coins(
     mnemonic: String,
     electrum_address: String,
@@ -44,7 +26,6 @@ pub fn list_coins(
     // Wipe our owned copy of the seed on every path out, including the `?`
     // early returns below.
     let mnemonic = Zeroizing::new(mnemonic);
-    check_scan_range(range_start, range_end)?;
     let coins = interface::list_coins(
         &mnemonic,
         electrum_address,
@@ -101,38 +82,4 @@ pub fn join_coinjoin(pool_raw_json: String, peer: FfiPeerConfig) -> Result<Strin
     let peer_config = peer.try_into()?;
     let txid = interface::join_coinjoin(pool, peer_config)?;
     Ok(txid)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scan_range_accepts_empty_and_max_span() {
-        assert!(check_scan_range(0, 0).is_ok());
-        assert!(check_scan_range(5, 6).is_ok());
-        assert!(check_scan_range(0, MAX_SCAN_SPAN).is_ok());
-        // The bound is on the span, not on the absolute indexes.
-        assert!(check_scan_range(u32::MAX - MAX_SCAN_SPAN, u32::MAX).is_ok());
-    }
-
-    #[test]
-    fn scan_range_rejects_span_over_max() {
-        let err = check_scan_range(0, MAX_SCAN_SPAN + 1).unwrap_err();
-        assert!(err.message.contains("exceeds maximum"), "{}", err.message);
-    }
-
-    #[test]
-    fn scan_range_rejects_inverted_range() {
-        let err = check_scan_range(10, 9).unwrap_err();
-        assert!(err.message.contains("is before start"), "{}", err.message);
-    }
-
-    /// An inverted range must be rejected before the span subtraction, which
-    /// would otherwise underflow (panic in debug, wrap in release).
-    #[test]
-    fn scan_range_inverted_does_not_underflow() {
-        let err = check_scan_range(u32::MAX, 0).unwrap_err();
-        assert!(err.message.contains("is before start"), "{}", err.message);
-    }
 }

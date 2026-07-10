@@ -176,7 +176,8 @@ pub struct FfiPool {
     /// an absolute instant (`now + max_duration`), never a duration.
     pub expires_at_unix_sec: u64,
     pub relay: String,
-    /// Fixed fee rate in satoshis per vByte (0 when delegated to a provider).
+    /// Fixed fee rate in satoshis per vByte. Pools that delegate their fee to a
+    /// provider cannot be joined by this version and are never listed.
     pub fee_rate: u32,
     /// Initiator's nostr public key, as hex.
     pub public_key: String,
@@ -202,7 +203,16 @@ impl FfiPool {
         })?;
 
         let denomination_sat = payload.denomination.to_sat();
-        let peers = payload.peers as u32;
+        // `peers` is a relay-controlled `usize`. Truncating it would render a
+        // pool that can never fill (`"peers": 4294967298`) as a plausible
+        // 2-peer one, while `raw_json` still carries the real value into
+        // `join_coinjoin`'s `min_peers`.
+        let peers = u32::try_from(payload.peers).map_err(|_| {
+            JoinstrError::new(format!(
+                "pool {} requires {} peers, more than this version can join",
+                pool.id, payload.peers
+            ))
+        })?;
         // Only `Simple` carries an absolute expiry; `Fixed` and `Timeout` carry
         // a `max_duration`. Rather than collapse both units into one field,
         // refuse them: `Joinstr::new_peer_with_electrum` rejects every non-`Simple`
@@ -218,9 +228,18 @@ impl FfiPool {
             }
         };
         let relay = payload.relay.clone();
+        // As with the timeline above, `Joinstr::new_peer` rejects a provider fee
+        // with `FeeProviderNotImplemented`. Reporting it as 0 sat/vB would list
+        // an unjoinable pool as the cheapest one on offer.
         let fee_rate = match &payload.fee {
             Fee::Fixed(fee) => *fee,
-            Fee::Provider(_) => 0,
+            Fee::Provider(_) => {
+                return Err(JoinstrError::new(format!(
+                    "pool {} delegates its fee to a provider, which this \
+                     version cannot join",
+                    pool.id
+                )))
+            }
         };
 
         Ok(FfiPool {
@@ -312,17 +331,36 @@ mod tests {
     }
 
     #[test]
-    fn fixed_fee_is_passed_through_and_provider_fee_is_zero() {
+    fn fixed_fee_is_passed_through() {
         let fixed = pool_with(Some(payload_with(Timeline::Simple(300), Fee::Fixed(7))));
         assert_eq!(FfiPool::from_pool(&fixed).unwrap().fee_rate, 7);
+    }
 
+    /// `Joinstr::new_peer` returns `FeeProviderNotImplemented` for these, so a
+    /// provider-fee pool must not be listed as a joinable 0 sat/vB pool.
+    #[test]
+    fn provider_fee_is_refused_not_reported_as_zero() {
         let provider = pool_with(Some(payload_with(
             Timeline::Simple(300),
             Fee::Provider(joinstr::nostr::Provider {
                 address: "provider.example".into(),
             }),
         )));
-        assert_eq!(FfiPool::from_pool(&provider).unwrap().fee_rate, 0);
+        let err = FfiPool::from_pool(&provider).err().unwrap();
+        assert!(err.message.contains("provider"), "{}", err.message);
+    }
+
+    /// A relay-controlled `usize` must not truncate into `u32`.
+    #[test]
+    fn peer_count_above_u32_is_refused_not_truncated() {
+        let mut payload = payload_with(Timeline::Simple(300), Fee::Fixed(1));
+        payload.peers = u32::MAX as usize + 2; // would truncate to 1
+        let err = FfiPool::from_pool(&pool_with(Some(payload))).err().unwrap();
+        assert!(
+            err.message.contains("more than this version"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

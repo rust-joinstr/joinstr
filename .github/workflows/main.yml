@@ -33,6 +33,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The dart bindings steps below build a separate workspace with its
+          # own target dir, which the default `workspaces: .` never caches.
+          workspaces: |
+            .
+            dart/rust
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -100,8 +106,19 @@ jobs:
           # check below would then report as a spurious diff.
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          # dart/rust is its own workspace with its own target dir; without this
+          # its FRB/icu/openssl tree is cold-built on every run.
+          workspaces: |
+            .
+            dart/rust
+      # Pinned for the same reason clippy is: codegen shells out to `dart format`
+      # and the staleness check compares those bytes, so a stable release that
+      # changes formatting or analyzer lints would turn CI red on an unrelated
+      # PR. Bump deliberately.
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: 3.44.2
           channel: stable
           cache: true
 
@@ -123,12 +140,18 @@ jobs:
         run: flutter_rust_bridge_codegen generate
       - name: Fail if committed bindings are stale
         run: |
-          if ! git diff --exit-code -- \
-            dart/lib/src/generated \
-            dart/rust/src/frb_generated.rs \
-            dart/ios/Classes/frb_generated.h; then
-            echo "::error::Committed flutter_rust_bridge output is stale."
+          set -euo pipefail
+          paths='dart/lib/src/generated dart/rust/src/frb_generated.rs dart/ios/Classes/frb_generated.h'
+          # `git diff` is blind to untracked files. Codegen emits one dart file
+          # per api module, so a new module whose generated file was never
+          # `git add`ed would regenerate here, leave the diff empty, and let a
+          # tree that no consumer can build pass as green. `git status` sees it.
+          changes=$(git status --porcelain -- $paths)
+          if [ -n "$changes" ]; then
+            echo "::error::Committed flutter_rust_bridge output is stale or incomplete."
             echo "Run 'cd dart && flutter_rust_bridge_codegen generate' and commit the result."
+            echo "$changes"
+            git diff -- $paths
             exit 1
           fi
 

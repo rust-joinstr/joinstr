@@ -136,7 +136,8 @@ class FfiPool {
   final BigInt expiresAtUnixSec;
   final String relay;
 
-  /// Fixed fee rate in satoshis per vByte (0 when delegated to a provider).
+  /// Fixed fee rate in satoshis per vByte. Pools that delegate their fee to a
+  /// provider cannot be joined by this version and are never listed.
   final int feeRate;
 
   /// Initiator's nostr public key, as hex.
