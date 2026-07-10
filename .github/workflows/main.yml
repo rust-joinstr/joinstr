@@ -168,3 +168,55 @@ jobs:
       - name: flutter analyze (example)
         working-directory: dart/example
         run: flutter pub get && flutter analyze
+
+  android-example:
+    # The plugin declares `android: {ffiPlugin: true}`, so a consuming app runs
+    # the vendored cargokit Gradle task. Nothing else here exercises it: a break
+    # would surface first in a downstream app's build, not ours.
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dart/rust
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.2
+          channel: stable
+          cache: true
+      - name: build apk
+        working-directory: dart/example
+        run: flutter build apk --debug --target-platform android-arm64
+
+  ios-example:
+    # The plugin declares `ios: {ffiPlugin: true}`, so a consuming iOS app runs
+    # dart/ios/joinstr_flutter.podspec's script_phase into cargokit's
+    # build_pod.sh. That path was never built before, so an iOS consumer would
+    # have discovered its breakage on our behalf. --no-codesign keeps this
+    # buildable without signing secrets.
+    runs-on: macos-latest
+    if: github.event.pull_request.draft != true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dart/rust
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.2
+          channel: stable
+          cache: true
+      - name: build ios
+        working-directory: dart/example
+        run: flutter build ios --debug --no-codesign

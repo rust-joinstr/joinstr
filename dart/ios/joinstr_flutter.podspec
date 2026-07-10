@@ -11,6 +11,13 @@ Dart/Flutter bindings for rust-joinstr/joinstr.
 
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
+  # Both were missing, unlike the macos podspec. Without the Flutter dependency
+  # the pod cannot see the engine headers, and without a platform CocoaPods
+  # falls back to a deployment target far below what Flutter requires. 13.0
+  # matches the example's IPHONEOS_DEPLOYMENT_TARGET.
+  s.dependency 'Flutter'
+  s.platform = :ios, '13.0'
+
   s.script_phase = {
     :name => 'Build Rust library',
     :script => 'sh "$PODS_TARGET_SRCROOT/../cargokit/build_pod.sh" ../rust joinstr_flutter',
