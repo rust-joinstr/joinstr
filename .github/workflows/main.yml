@@ -8,6 +8,14 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Must match `flutter_rust_bridge` in dart/rust/Cargo.toml and dart/pubspec.yaml.
+  # A mismatched codegen binary produces a spurious diff in the bindings check.
+  FRB_VERSION: 2.12.0
+
+# Every job here only reads the repo and runs checks. Nothing pushes, comments,
+# or publishes, so the default read/write GITHUB_TOKEN is more than any step needs.
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -15,20 +23,44 @@ jobs:
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
+      # Pinned so a new clippy release cannot turn CI red on an unrelated PR.
+      # Bump deliberately, and fix the new lints in that same commit.
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The dart bindings steps below build a separate workspace with its
+          # own target dir, which the default `workspaces: .` never caches.
+          workspaces: |
+            .
+            dart/rust
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # dart/rust sets its own `[workspace]`, so it is invisible to the
+      # --workspace commands above and needs its own invocation.
+      - name: rustfmt (dart bindings)
+        working-directory: dart/rust
+        run: cargo fmt -- --check
+      - name: clippy (dart bindings)
+        working-directory: dart/rust
+        run: cargo clippy --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: tests
@@ -41,7 +73,98 @@ jobs:
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: build
         run: cargo build --release
+
+  bindings:
+    # The flutter_rust_bridge output under dart/lib/src/generated and
+    # dart/rust/src/frb_generated.rs is committed. Regenerate it and fail if it
+    # differs, so a change to dart/rust/src/api can never land with stale
+    # bindings (which breaks the build only once someone runs codegen).
+    #
+    # dart/rust's tests run here rather than in the `test` job because its
+    # dependency tree (icu_* via idna_adapter) requires rustc >= 1.86, so it
+    # cannot build on the older toolchain that job pins.
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # No step needs the token afterwards; leaving it in .git/config only
+          # widens the blast radius if a later step is compromised.
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          # codegen shells out to rustfmt for frb_generated.rs and silently
+          # emits unformatted output if it is absent, which the staleness
+          # check below would then report as a spurious diff.
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # dart/rust is its own workspace with its own target dir; without this
+          # its FRB/icu/openssl tree is cold-built on every run.
+          workspaces: |
+            .
+            dart/rust
+      # Pinned for the same reason clippy is: codegen shells out to `dart format`
+      # and the staleness check compares those bytes, so a stable release that
+      # changes formatting or analyzer lints would turn CI red on an unrelated
+      # PR. Bump deliberately.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.2
+          channel: stable
+          cache: true
+
+      - name: Cache codegen binary
+        id: cache-frb
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/flutter_rust_bridge_codegen
+          key: frb-codegen-${{ env.FRB_VERSION }}-${{ runner.os }}
+      - name: Install codegen
+        if: steps.cache-frb.outputs.cache-hit != 'true'
+        run: cargo install flutter_rust_bridge_codegen --version ${{ env.FRB_VERSION }} --locked
+
+      - name: flutter pub get
+        working-directory: dart
+        run: flutter pub get
+      - name: Regenerate bindings
+        working-directory: dart
+        run: flutter_rust_bridge_codegen generate
+      - name: Fail if committed bindings are stale
+        run: |
+          set -euo pipefail
+          paths='dart/lib/src/generated dart/rust/src/frb_generated.rs dart/ios/Classes/frb_generated.h'
+          # `git diff` is blind to untracked files. Codegen emits one dart file
+          # per api module, so a new module whose generated file was never
+          # `git add`ed would regenerate here, leave the diff empty, and let a
+          # tree that no consumer can build pass as green. `git status` sees it.
+          changes=$(git status --porcelain -- $paths)
+          if [ -n "$changes" ]; then
+            echo "::error::Committed flutter_rust_bridge output is stale or incomplete."
+            echo "Run 'cd dart && flutter_rust_bridge_codegen generate' and commit the result."
+            echo "$changes"
+            git diff -- $paths
+            exit 1
+          fi
+
+      # Covers the FFI boundary: scan-range bounds, pool decoding, mnemonic
+      # handling. Runs after the staleness check so a stale-bindings failure is
+      # not masked by a compile error.
+      - name: tests (dart bindings)
+        working-directory: dart/rust
+        run: cargo test
+
+      - name: flutter analyze
+        working-directory: dart
+        run: flutter analyze
+      - name: flutter analyze (example)
+        working-directory: dart/example
+        run: flutter pub get && flutter analyze

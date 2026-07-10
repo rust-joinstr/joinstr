@@ -9,7 +9,7 @@ use joinstr::miniscript::bitcoin::{
 };
 use joinstr::nostr::{Fee, Pool, Timeline};
 use joinstr::signer::{Coin, CoinPath};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::api::error::JoinstrError;
 
@@ -27,19 +27,6 @@ impl From<BitcoinNetwork> for Network {
             BitcoinNetwork::Testnet => Network::Testnet,
             BitcoinNetwork::Signet => Network::Signet,
             BitcoinNetwork::Regtest => Network::Regtest,
-        }
-    }
-}
-
-impl From<Network> for BitcoinNetwork {
-    fn from(value: Network) -> Self {
-        match value {
-            Network::Bitcoin => BitcoinNetwork::Bitcoin,
-            Network::Testnet => BitcoinNetwork::Testnet,
-            Network::Signet => BitcoinNetwork::Signet,
-            Network::Regtest => BitcoinNetwork::Regtest,
-            // bitcoin::Network is #[non_exhaustive]
-            _ => BitcoinNetwork::Regtest,
         }
     }
 }
@@ -97,7 +84,9 @@ impl TryFrom<FfiCoin> for Coin {
 pub struct FfiPoolConfig {
     /// Denomination of each output, in BTC.
     pub denomination_btc: f64,
-    /// Mining fee contributed, in satoshis.
+    /// Fee rate, in satoshis per vByte. Each output is reduced by `fee * 100`
+    /// satoshis, 100 vB being the assumed weight of one participant's
+    /// input+output pair.
     pub fee: u32,
     /// Seconds to wait for the pool to fill.
     pub max_duration: u64,
@@ -122,7 +111,8 @@ impl From<FfiPoolConfig> for PoolConfig {
 pub struct FfiPeerConfig {
     /// BIP39 mnemonic of the wallet that owns `input` and will sign.
     pub mnemonic: String,
-    /// Electrum server hostname / IP (no scheme, no port).
+    /// Electrum server hostname / IP, without a port. Prefix with `ssl://` to
+    /// negotiate TLS; anything else connects in plaintext.
     pub electrum_address: String,
     pub electrum_port: u16,
     /// The coin spent into the coinjoin (e.g. from `list_coins`).
@@ -138,11 +128,11 @@ impl TryFrom<FfiPeerConfig> for PeerConfig {
     type Error = JoinstrError;
 
     fn try_from(mut value: FfiPeerConfig) -> Result<Self, Self::Error> {
-        let mnemonics = Mnemonic::from_str(&value.mnemonic)
+        // Move the seed into a guard that wipes on every path out, including the
+        // parse failure below. The parsed `Mnemonic` is what flows downstream.
+        let mnemonic = Zeroizing::new(std::mem::take(&mut value.mnemonic));
+        let mnemonics = Mnemonic::from_str(&mnemonic)
             .map_err(|e| JoinstrError::new(format!("invalid mnemonic: {e}")))?;
-        // Wipe our owned copy of the seed once it has been parsed; the parsed
-        // `Mnemonic` is what flows downstream.
-        value.mnemonic.zeroize();
         let output = Address::from_str(&value.output_address)
             .map_err(|e| JoinstrError::new(format!("invalid output address: {e}")))?;
         let input = Coin::try_from(value.input)?;
@@ -172,19 +162,22 @@ impl FfiPeerConfig {
 /// A coinjoin pool advertised on a nostr relay.
 ///
 /// Pass `raw_json` back to `join_coinjoin` to join; the other fields are decoded
-/// for display.
+/// for display. There is deliberately no `network` field: pool events do not
+/// carry one, so it cannot be known here. The caller supplies the network when
+/// joining, via `FfiPeerConfig::network`.
 pub struct FfiPool {
     pub id: String,
     /// Canonical JSON; pass back to `join_coinjoin`.
     pub raw_json: String,
-    pub network: BitcoinNetwork,
     /// Denomination of each output, in satoshis.
     pub denomination_sat: u64,
     pub peers: u32,
-    /// Pool timeout / max duration, in seconds.
-    pub timeout: u64,
+    /// When the pool expires, as a unix timestamp in seconds. Pool events carry
+    /// an absolute instant (`now + max_duration`), never a duration.
+    pub expires_at_unix_sec: u64,
     pub relay: String,
-    /// Fixed fee in satoshis (0 when delegated to a provider).
+    /// Fixed fee rate in satoshis per vByte. Pools that delegate their fee to a
+    /// provider cannot be joined by this version and are never listed.
     pub fee_rate: u32,
     /// Initiator's nostr public key, as hex.
     pub public_key: String,
@@ -196,35 +189,281 @@ impl FfiPool {
         let raw_json = joinstr::serde_json::to_string(pool)
             .map_err(|e| JoinstrError::new(format!("failed to serialize pool: {e}")))?;
 
-        let (denomination_sat, peers, timeout, relay, fee_rate) = match &pool.payload {
-            Some(payload) => (
-                payload.denomination.to_sat(),
-                payload.peers as u32,
-                match payload.timeout {
-                    Timeline::Simple(t) => t,
-                    Timeline::Fixed { max_duration, .. } => max_duration,
-                    Timeline::Timeout { max_duration, .. } => max_duration,
-                },
-                payload.relay.clone(),
-                match &payload.fee {
-                    Fee::Fixed(fee) => *fee,
-                    Fee::Provider(_) => 0,
-                },
-            ),
-            None => (0, 0, 0, String::new(), 0),
+        // `payload` is `#[serde(flatten)]` into an `Option`, so serde yields
+        // `None` rather than an error whenever any inner field fails to decode
+        // (e.g. a fractional `fee_rate`, which `Fee::Fixed(u32)` cannot parse).
+        // Reporting that as a zero-valued pool would render an unjoinable pool
+        // as a plausible one, so refuse it instead.
+        let payload = pool.payload.as_ref().ok_or_else(|| {
+            JoinstrError::new(format!(
+                "pool {} has no decodable payload; it may use fields this \
+                 version cannot parse",
+                pool.id
+            ))
+        })?;
+
+        let denomination_sat = payload.denomination.to_sat();
+        // `peers` is a relay-controlled `usize`. Truncating it would render a
+        // pool that can never fill (`"peers": 4294967298`) as a plausible
+        // 2-peer one, while `raw_json` still carries the real value into
+        // `join_coinjoin`'s `min_peers`.
+        let peers = u32::try_from(payload.peers).map_err(|_| {
+            JoinstrError::new(format!(
+                "pool {} requires {} peers, more than this version can join",
+                pool.id, payload.peers
+            ))
+        })?;
+        // Only `Simple` carries an absolute expiry; `Fixed` and `Timeout` carry
+        // a `max_duration`. Rather than collapse both units into one field,
+        // refuse them: `Joinstr::new_peer_with_electrum` rejects every non-`Simple`
+        // timeline with `TimelineNotImplemented`, so such a pool can never be
+        // joined and must not be listed as though it could be.
+        let expires_at_unix_sec = match payload.timeout {
+            Timeline::Simple(t) => t,
+            _ => {
+                return Err(JoinstrError::new(format!(
+                    "pool {} uses a timeline this version cannot join",
+                    pool.id
+                )))
+            }
+        };
+        let relay = payload.relay.clone();
+        // As with the timeline above, `Joinstr::new_peer` rejects a provider fee
+        // with `FeeProviderNotImplemented`. Reporting it as 0 sat/vB would list
+        // an unjoinable pool as the cheapest one on offer.
+        let fee_rate = match &payload.fee {
+            Fee::Fixed(fee) => *fee,
+            Fee::Provider(_) => {
+                return Err(JoinstrError::new(format!(
+                    "pool {} delegates its fee to a provider, which this \
+                     version cannot join",
+                    pool.id
+                )))
+            }
         };
 
         Ok(FfiPool {
             id: pool.id.clone(),
             raw_json,
-            network: pool.network.into(),
             denomination_sat,
             peers,
-            timeout,
+            expires_at_unix_sec,
             relay,
             fee_rate,
             public_key: pool.public_key.to_string(),
             version: pool.version.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use joinstr::nostr::{PoolPayload, PoolType, Transport, Vpn};
+
+    const PUBKEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn pool_with(payload: Option<PoolPayload>) -> Pool {
+        Pool {
+            version: Some("1".into()),
+            id: "pool-id".into(),
+            network: Network::Signet,
+            pool_type: PoolType::Create,
+            public_key: PUBKEY.parse().unwrap(),
+            payload,
+        }
+    }
+
+    fn payload_with(timeout: Timeline, fee: Fee) -> PoolPayload {
+        PoolPayload {
+            denomination: Amount::from_sat(100_000),
+            peers: 2,
+            timeout,
+            relay: "wss://nos.lol".into(),
+            fee,
+            transport: Transport {
+                vpn: Some(Vpn {
+                    enable: false,
+                    gateway: None,
+                }),
+                tor: None,
+            },
+            vpn_gateway: None,
+        }
+    }
+
+    /// `Simple` carries an absolute unix timestamp, matching what the Electrum
+    /// plugin writes (`int(time.time()) + timeout`) and what `Pool::create`
+    /// builds. It is surfaced verbatim, not reinterpreted as a duration.
+    #[test]
+    fn simple_timeline_is_surfaced_as_an_absolute_expiry() {
+        let expiry = 1_793_500_000;
+        let pool = pool_with(Some(payload_with(Timeline::Simple(expiry), Fee::Fixed(1))));
+        assert_eq!(
+            FfiPool::from_pool(&pool).unwrap().expires_at_unix_sec,
+            expiry
+        );
+    }
+
+    /// `Joinstr::new_peer_with_electrum` rejects every non-`Simple` timeline
+    /// with `TimelineNotImplemented`, so listing such a pool would offer the
+    /// user a join that cannot succeed.
+    #[test]
+    fn unjoinable_timelines_are_refused_rather_than_listed() {
+        for timeline in [
+            Timeline::Fixed {
+                start: 10,
+                max_duration: 600,
+            },
+            Timeline::Timeout {
+                timeout: 20,
+                max_duration: 900,
+            },
+        ] {
+            let pool = pool_with(Some(payload_with(timeline, Fee::Fixed(1))));
+            let err = FfiPool::from_pool(&pool).err().unwrap();
+            assert!(
+                err.message.contains("cannot join"),
+                "timeline {timeline:?}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_fee_is_passed_through() {
+        let fixed = pool_with(Some(payload_with(Timeline::Simple(300), Fee::Fixed(7))));
+        assert_eq!(FfiPool::from_pool(&fixed).unwrap().fee_rate, 7);
+    }
+
+    /// `Joinstr::new_peer` returns `FeeProviderNotImplemented` for these, so a
+    /// provider-fee pool must not be listed as a joinable 0 sat/vB pool.
+    #[test]
+    fn provider_fee_is_refused_not_reported_as_zero() {
+        let provider = pool_with(Some(payload_with(
+            Timeline::Simple(300),
+            Fee::Provider(joinstr::nostr::Provider {
+                address: "provider.example".into(),
+            }),
+        )));
+        let err = FfiPool::from_pool(&provider).err().unwrap();
+        assert!(err.message.contains("provider"), "{}", err.message);
+    }
+
+    /// A relay-controlled `usize` must not truncate into `u32`.
+    #[test]
+    fn peer_count_above_u32_is_refused_not_truncated() {
+        let mut payload = payload_with(Timeline::Simple(300), Fee::Fixed(1));
+        payload.peers = u32::MAX as usize + 2; // would truncate to 1
+        let err = FfiPool::from_pool(&pool_with(Some(payload))).err().unwrap();
+        assert!(
+            err.message.contains("more than this version"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn payload_fields_are_mapped() {
+        let pool = pool_with(Some(payload_with(Timeline::Simple(300), Fee::Fixed(1))));
+        let ffi = FfiPool::from_pool(&pool).unwrap();
+        assert_eq!(ffi.denomination_sat, 100_000);
+        assert_eq!(ffi.peers, 2);
+        assert_eq!(ffi.relay, "wss://nos.lol");
+        assert_eq!(ffi.id, "pool-id");
+        assert_eq!(ffi.version.as_deref(), Some("1"));
+    }
+
+    fn peer_config_with(mnemonic: &str) -> FfiPeerConfig {
+        FfiPeerConfig {
+            mnemonic: mnemonic.into(),
+            electrum_address: "127.0.0.1".into(),
+            electrum_port: 50001,
+            input: FfiCoin {
+                txid: "0000000000000000000000000000000000000000000000000000000000000001".into(),
+                vout: 0,
+                value_sat: 100_500,
+                script_pubkey: vec![0x00, 0x14],
+                sequence: 0xffff_ffff,
+                coin_path_depth: 0,
+                coin_path_index: Some(0),
+            },
+            output_address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080".into(),
+            relay: "wss://nos.lol".into(),
+            network: BitcoinNetwork::Regtest,
+        }
+    }
+
+    /// The mnemonic is moved into a `Zeroizing` guard *before* the parse, so
+    /// this error path wipes it rather than dropping the seed intact.
+    #[test]
+    fn invalid_mnemonic_is_rejected() {
+        let err = PeerConfig::try_from(peer_config_with("not a real mnemonic"))
+            .err()
+            .unwrap();
+        assert!(err.message.contains("invalid mnemonic"), "{}", err.message);
+    }
+
+    #[test]
+    fn valid_peer_config_converts() {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon \
+                        abandon abandon abandon abandon abandon about";
+        assert!(PeerConfig::try_from(peer_config_with(mnemonic)).is_ok());
+    }
+
+    #[test]
+    fn missing_payload_is_an_error_not_a_zeroed_pool() {
+        let err = FfiPool::from_pool(&pool_with(None)).err().unwrap();
+        assert!(
+            err.message.contains("no decodable payload"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// The Electrum plugin publishes `fee_rate` as a float (`fee_per_kb/1000`),
+    /// which `Fee::Fixed(u32)` cannot parse. Because `payload` is a flattened
+    /// `Option`, serde reports that as `None` instead of an error. Pin both
+    /// halves: the silent `None`, and our refusal to render it as a real pool.
+    #[test]
+    fn float_fee_rate_yields_no_payload_and_is_rejected() {
+        let json = r#"{"type":"new_pool","id":"abc",
+            "public_key":"0000000000000000000000000000000000000000000000000000000000000001",
+            "denomination":0.001,"peers":2,"timeout":300,"relay":"wss://nos.lol",
+            "fee_rate":1.5,"transport":"vpn"}"#;
+        let pool: Pool = joinstr::serde_json::from_str(json).unwrap();
+        assert!(pool.payload.is_none(), "serde silently drops the payload");
+        assert!(FfiPool::from_pool(&pool).is_err());
+
+        // The same pool with an integer fee_rate decodes normally.
+        let pool: Pool = joinstr::serde_json::from_str(&json.replace("1.5", "1")).unwrap();
+        assert_eq!(FfiPool::from_pool(&pool).unwrap().fee_rate, 1);
+    }
+
+    /// `raw_json` is fed straight back into `join_coinjoin`, so every field that
+    /// determines join behaviour must survive the round trip.
+    ///
+    /// Two fields are exempt by design: `network` is `skip_serializing` (the
+    /// peer reapplies it), and `transport` encodes to a bare `"tor"`/`"vpn"`/`""`
+    /// string, so an absent leg decodes back as an explicitly-disabled one.
+    #[test]
+    fn raw_json_round_trips_the_fields_that_drive_the_join() {
+        let pool = pool_with(Some(payload_with(Timeline::Simple(300), Fee::Fixed(1))));
+        let ffi = FfiPool::from_pool(&pool).unwrap();
+        let decoded: Pool = joinstr::serde_json::from_str(&ffi.raw_json).unwrap();
+
+        assert_eq!(decoded.id, pool.id);
+        assert_eq!(decoded.public_key, pool.public_key);
+        assert_eq!(decoded.version, pool.version);
+        assert_eq!(decoded.pool_type, pool.pool_type);
+
+        let (got, want) = (decoded.payload.unwrap(), pool.payload.unwrap());
+        assert_eq!(got.denomination, want.denomination);
+        assert_eq!(got.peers, want.peers);
+        assert_eq!(got.timeout, want.timeout);
+        assert_eq!(got.relay, want.relay);
+        assert_eq!(got.fee, want.fee);
+        assert!(!got.transport.tor.is_some_and(|t| t.enable));
+        assert!(!got.transport.vpn.is_some_and(|v| v.enable));
     }
 }

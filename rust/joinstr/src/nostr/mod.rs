@@ -118,6 +118,34 @@ mod serde_denomination {
     }
 }
 
+/// The NIP publishes several scalar fields as single-element arrays
+/// (`"relays": ["wss://.."]`, `"versions": ["1"]`). Accept either shape, taking
+/// the first string entry and tolerating mixed-type arrays, but refuse an array
+/// that carries no string at all rather than silently yielding nothing.
+///
+/// Shared by `serde_relay` and `serde_version` so both fields decode the same
+/// event by the same rules.
+fn string_or_first_of_array<E: serde::de::Error>(
+    value: serde_json::Value,
+    field: &str,
+) -> Result<String, E> {
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Err(E::custom(format!("{field} array is empty")));
+            }
+            arr.into_iter()
+                .find_map(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .ok_or_else(|| E::custom(format!("{field} array contains no string entries")))
+        }
+        _ => Err(E::custom(format!("{field} must be a string or array"))),
+    }
+}
+
 mod serde_relay {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
@@ -133,26 +161,27 @@ mod serde_relay {
         D: Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
+        super::string_or_first_of_array(value, "relay")
+    }
+}
+
+mod serde_version {
+    use serde::{self, Deserialize, Deserializer};
+
+    /// Only the deserialize half is custom. `Option<String>` already serializes
+    /// as a bare string, and `skip_serializing_if` drops the `None` case, so a
+    /// `serialize` here would be dead code.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
         match value {
-            serde_json::Value::String(s) => Ok(s),
-            serde_json::Value::Array(arr) => {
-                if arr.is_empty() {
-                    return Err(serde::de::Error::custom("relay array is empty"));
-                }
-                // Leniently picks the first string entry; non-string elements
-                // are ignored to tolerate mixed-type arrays from other implementations.
-                let first = arr.into_iter().find_map(|v| {
-                    if let serde_json::Value::String(s) = v {
-                        Some(s)
-                    } else {
-                        None
-                    }
-                });
-                first.ok_or_else(|| {
-                    serde::de::Error::custom("relay array contains no string entries")
-                })
-            }
-            _ => Err(serde::de::Error::custom("relay must be a string or array")),
+            serde_json::Value::Null => Ok(None),
+            // NIP.md publishes this field as `"versions": ["1"]`. An array that
+            // carries no version string is an error, not an unversioned pool:
+            // `default_version()` would otherwise relabel it as version 1.
+            other => super::string_or_first_of_array(other, "version").map(Some),
         }
     }
 }
@@ -229,6 +258,7 @@ pub struct Pool {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default = "default_version")]
     #[serde(alias = "versions")]
+    #[serde(deserialize_with = "serde_version::deserialize")]
     pub version: Option<String>,
     pub id: String,
     #[serde(default = "default_network")]
@@ -1342,6 +1372,64 @@ pub mod tests {
         assert_eq!(payload.peers, 2);
         assert_eq!(payload.relay, "ws://127.0.0.1:34889");
         assert_eq!(payload.fee, Fee::Fixed(10));
+    }
+
+    /// NIP.md's `kind:2022` example publishes `"versions": ["1"]`. Decoding it as
+    /// a bare string used to fail the whole `Pool`, which `receive_pool_notification`
+    /// turned into a `None` that truncated the caller's listing loop.
+    #[test]
+    fn pool_versions_array_from_nip_decodes() {
+        let raw = r#"{
+            "versions": ["1"],
+            "id": "e37076afaf4a0054fd144f0b843c174173e7d0620a572572c0a34e6b78023afe",
+            "type": "create",
+            "public_key": "8f09f051d2a699bfd9fc289b7edb49cda50768067181df23735f3e921955001b",
+            "denomination": 1000000,
+            "peers": 2,
+            "timeout": 1731808735,
+            "relays": ["ws://127.0.0.1:34889"],
+            "fee_rate": 10,
+            "transport": { "vpn": { "enable": false }, "tor": { "enable": false } }
+        }"#;
+        let pool: Pool = serde_json::from_str(raw).unwrap();
+        assert_eq!(pool.version, Some("1".into()));
+        assert!(pool.payload.is_some());
+
+        // A legacy `["0"]` array decodes too, rather than failing the parse.
+        let pool: Pool = serde_json::from_str(&raw.replace(r#"["1"]"#, r#"["0"]"#)).unwrap();
+        assert_eq!(pool.version, Some("0".into()));
+    }
+
+    /// An array carrying no version string must be an error, not `None`.
+    /// `default_version()` applies only to an absent field, and `raw_json` omits
+    /// `None`, so silently accepting these would relabel the pool as version 1
+    /// between listing and joining.
+    #[test]
+    fn pool_versions_array_without_a_string_is_rejected() {
+        let raw = r#"{
+            "versions": ["1"],
+            "id": "e37076afaf4a0054fd144f0b843c174173e7d0620a572572c0a34e6b78023afe",
+            "type": "create",
+            "public_key": "8f09f051d2a699bfd9fc289b7edb49cda50768067181df23735f3e921955001b",
+            "denomination": 1000000,
+            "peers": 2,
+            "timeout": 1731808735,
+            "relays": ["ws://127.0.0.1:34889"],
+            "fee_rate": 10,
+            "transport": { "vpn": { "enable": false }, "tor": { "enable": false } }
+        }"#;
+
+        for bad in [r#"[]"#, r#"[2]"#, r#"[{"a":1}]"#] {
+            let json = raw.replace(r#"["1"]"#, bad);
+            let err = serde_json::from_str::<Pool>(&json)
+                .expect_err(&format!("`versions: {bad}` must not decode"));
+            assert!(err.to_string().contains("version"), "{err}");
+        }
+
+        // A mixed array still yields its first string entry.
+        let json = raw.replace(r#"["1"]"#, r#"[2, "3"]"#);
+        let pool: Pool = serde_json::from_str(&json).unwrap();
+        assert_eq!(pool.version, Some("3".into()));
     }
 
     #[test]

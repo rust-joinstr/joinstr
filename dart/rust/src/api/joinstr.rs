@@ -3,18 +3,18 @@
 //! the UI isolate so Dart awaits each as a `Future`.
 
 use joinstr::interface;
+use joinstr::log::warn;
 use joinstr::nostr::Pool;
+use zeroize::Zeroizing;
 
 use crate::api::error::JoinstrError;
 use crate::api::types::{BitcoinNetwork, FfiCoin, FfiPeerConfig, FfiPool, FfiPoolConfig};
 
-/// Upper bound on the number of derivation indexes a single `list_coins` call
-/// may scan. Each index issues two synchronous electrum queries, so an
-/// unbounded span (e.g. `0..u32::MAX`) would hang the caller indefinitely.
-const MAX_SCAN_SPAN: u32 = 100_000;
-
 /// List spendable coins by scanning electrum over derivation indexes
 /// `[range_start, range_end)` on both the receive and change branches.
+///
+/// The range is bounded by `interface::check_scan_range`, so every binding
+/// shares one guard rather than each re-implementing it.
 pub fn list_coins(
     mnemonic: String,
     electrum_address: String,
@@ -23,19 +23,11 @@ pub fn list_coins(
     range_end: u32,
     network: BitcoinNetwork,
 ) -> Result<Vec<FfiCoin>, JoinstrError> {
-    if range_end < range_start {
-        return Err(JoinstrError::new(format!(
-            "invalid range: end {range_end} is before start {range_start}"
-        )));
-    }
-    if range_end - range_start > MAX_SCAN_SPAN {
-        return Err(JoinstrError::new(format!(
-            "range span {} exceeds maximum {MAX_SCAN_SPAN}",
-            range_end - range_start
-        )));
-    }
+    // Wipe our owned copy of the seed on every path out, including the `?`
+    // early returns below.
+    let mnemonic = Zeroizing::new(mnemonic);
     let coins = interface::list_coins(
-        mnemonic,
+        &mnemonic,
         electrum_address,
         electrum_port,
         (range_start, range_end),
@@ -46,9 +38,21 @@ pub fn list_coins(
 
 /// List coinjoin pools advertised on `relay` (`wss://`/`ws://`) within the last
 /// `back` seconds, waiting `timeout` microseconds for relay notifications.
+///
+/// A relay carries pools from every client; one this version cannot decode is
+/// skipped, not surfaced as a placeholder and not allowed to fail the listing.
 pub fn list_pools(back: u64, timeout: u64, relay: String) -> Result<Vec<FfiPool>, JoinstrError> {
     let pools = interface::list_pools(back, timeout, relay)?;
-    pools.iter().map(FfiPool::from_pool).collect()
+    Ok(pools
+        .iter()
+        .filter_map(|pool| match FfiPool::from_pool(pool) {
+            Ok(ffi) => Some(ffi),
+            Err(e) => {
+                warn!("skipping undecodable pool: {}", e.message);
+                None
+            }
+        })
+        .collect())
 }
 
 /// Initiate a new coinjoin pool and participate in it.
@@ -68,10 +72,7 @@ pub fn initiate_coinjoin(
 
 /// Join an advertised pool, passing the `raw_json` of an [`FfiPool`] from
 /// [`list_pools`]. Blocks until the coinjoin is broadcast; returns its txid.
-pub fn join_coinjoin(
-    pool_raw_json: String,
-    peer: FfiPeerConfig,
-) -> Result<String, JoinstrError> {
+pub fn join_coinjoin(pool_raw_json: String, peer: FfiPeerConfig) -> Result<String, JoinstrError> {
     let mut pool: Pool = joinstr::serde_json::from_str(&pool_raw_json)
         .map_err(|e| JoinstrError::new(format!("invalid pool json: {e}")))?;
     // `Pool::network` is `#[serde(skip_serializing)]` and defaults to mainnet on

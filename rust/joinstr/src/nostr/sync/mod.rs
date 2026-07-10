@@ -248,18 +248,29 @@ impl NostrClient {
 
     /// Try to poll notifications/events received by the client and parse it as
     ///    a Pool, it will return:
-    ///    - Some(Pool) if there is a message in the channel
-    ///    - None if the channel is empty or fail to parse as a Pool message
+    ///    - Some(Pool) for the next event that parses as a Pool
+    ///    - None only once the channel is empty
+    ///
+    /// Events that fail to parse are skipped rather than reported as `None`:
+    /// callers drain this with `while let Some(p) = receive_pool_notification()?`,
+    /// so returning `None` for an undecodable event would end the loop early and
+    /// silently truncate the listing at the first pool this version cannot read.
     ///
     /// # Errors
     ///
     /// This function will return an error if:
     ///   - fails to receive event
     pub fn receive_pool_notification(&mut self) -> Result<Option<Pool>, Error> {
-        Ok(if let Some(event) = self.client()?.try_receive()? {
-            Pool::try_from(event).ok()
-        } else {
-            None
-        })
+        while let Some(event) = self.client()?.try_receive()? {
+            match Pool::try_from(event) {
+                Ok(pool) => return Ok(Some(pool)),
+                Err(e) => log::warn!(
+                    "NostrClient({}).receive_pool_notification(): skipping undecodable pool event: {:?}",
+                    self.name,
+                    e
+                ),
+            }
+        }
+        Ok(None)
     }
 }
