@@ -236,10 +236,7 @@ jobs:
       - name: build ios
         working-directory: dart/example
         run: flutter build ios --debug --no-codesign
-      # iOS force-loads the static lib (see the podspec's OTHER_LDFLAGS), so the
-      # linking failure mode is different from Android's but the risk is the
-      # same: assert the wire symbols are present in the archive cargokit built.
-      # Mach-O prefixes C symbols with '_', which the substring match tolerates.
+      # Xcode's nm can't read rustc 1.96's LLVM 22 objects, so use llvm-nm.
       - name: verify FFI symbols are exported (iOS)
         working-directory: dart/example
         run: |
@@ -247,9 +244,13 @@ jobs:
           lib=$(find build "$HOME/Library/Developer/Xcode/DerivedData" \
             -name libjoinstr_flutter.a 2>/dev/null | head -1)
           test -n "$lib" || { echo "::error::libjoinstr_flutter.a not found"; exit 1; }
-          echo "inspecting $lib"
+          rustup component add llvm-tools-preview
+          host=$(rustc -vV | awk '/^host:/{print $2}')
+          llvm_nm="$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-nm"
+          test -x "$llvm_nm" || { echo "::error::llvm-nm not found at $llvm_nm"; exit 1; }
+          "$llvm_nm" "$lib" > "$RUNNER_TEMP/ios-syms.txt" 2>/dev/null || true
           for sym in list_coins list_pools initiate_coinjoin join_coinjoin; do
-            nm "$lib" | grep -q "frbgen_joinstr_flutter_wire__crate__api__joinstr__$sym" \
+            grep -q "frbgen_joinstr_flutter_wire__crate__api__joinstr__$sym" "$RUNNER_TEMP/ios-syms.txt" \
               || { echo "::error::missing exported symbol for $sym"; exit 1; }
           done
           echo "all four FFI entry points exported"
@@ -260,6 +261,8 @@ jobs:
         working-directory: dart/example
         run: |
           set -euo pipefail
-          dev=$(xcrun simctl list devices available | grep -m1 -oE '\([0-9A-F-]{36}\)' | tr -d '()')
+          dev=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ {print $2; exit}')
+          test -n "$dev" || { echo "::error::no available iPhone simulator"; exit 1; }
           xcrun simctl boot "$dev" || true
+          xcrun simctl bootstatus "$dev"
           flutter test integration_test/ffi_smoke_test.dart -d "$dev"
