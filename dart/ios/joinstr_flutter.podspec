@@ -29,12 +29,14 @@ Dart/Flutter bindings for rust-joinstr/joinstr.
     'DEFINES_MODULE' => 'YES',
     # Flutter.framework does not contain a i386 slice.
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
-    # -force_load pulls every object from the static archive into the app binary
-    # (nothing references the Rust symbols at link time, so they would otherwise
-    # be dropped). -export_dynamic then adds those globals to the dynamic symbol
-    # table so the Dart side, which loads them with ExternalLibrary.process()
-    # (i.e. dlsym(RTLD_DEFAULT, ...)), can find frb_get_rust_content_hash and the
-    # wire functions. Without it the archive links but the runtime lookup fails.
-    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/libjoinstr_flutter.a -Wl,-export_dynamic',
+    # Pull every object from the static archive into the binary that links it.
+    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/libjoinstr_flutter.a',
+  }
+  # -export_dynamic must land on the executable's link (app / test host), where
+  # the dynamic symbol table is built; on the static-archive pod target it is a
+  # no-op. Dart loads via ExternalLibrary.process() (dlsym(RTLD_DEFAULT, ...)),
+  # so the frb runtime and wire symbols have to be exported there.
+  s.user_target_xcconfig = {
+    'OTHER_LDFLAGS' => '-Wl,-export_dynamic',
   }
 end
