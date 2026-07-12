@@ -219,6 +219,9 @@ jobs:
     # have discovered its breakage on our behalf. --no-codesign keeps this
     # buildable without signing secrets.
     runs-on: macos-latest
+    # A hung simulator/integration-test step otherwise runs to the 360-minute
+    # default, and macOS minutes bill at 10x. Cap it so a hang fails fast.
+    timeout-minutes: 30
     if: github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
@@ -241,8 +244,11 @@ jobs:
         working-directory: dart/example
         run: |
           set -euo pipefail
+          # `|| true`: under pipefail, find returns non-zero if a search path is
+          # absent, and head closing the pipe early raises SIGPIPE (141); either
+          # would abort the assignment before the test -n check below.
           lib=$(find build "$HOME/Library/Developer/Xcode/DerivedData" \
-            -name libjoinstr_flutter.a 2>/dev/null | head -1)
+            -name libjoinstr_flutter.a 2>/dev/null | head -1 || true)
           test -n "$lib" || { echo "::error::libjoinstr_flutter.a not found"; exit 1; }
           rustup component add llvm-tools-preview
           host=$(rustc -vV | awk '/^host:/{print $2}')
