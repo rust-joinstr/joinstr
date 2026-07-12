@@ -280,6 +280,13 @@ jobs:
         working-directory: dart/example
         run: |
           set +e
+          echo "### archive location(s):"
+          find . "$HOME/Library/Developer/Xcode/DerivedData" \
+            -name libjoinstr_flutter.a 2>/dev/null
+          echo "### app link flags (Pods xcconfig OTHER_LDFLAGS):"
+          find . -name 'Pods-Runner*.xcconfig' 2>/dev/null \
+            -exec sh -c 'echo "-- $1"; grep -i "OTHER_LDFLAGS\|force_load" "$1"' _ {} \;
+          echo "### symbols in linked binaries:"
           find build "$HOME/Library/Developer/Xcode/DerivedData" \
             -path '*Runner.app/Runner' -type f 2>/dev/null | while read -r app; do
             echo "===== $app"

@@ -29,14 +29,13 @@ Dart/Flutter bindings for rust-joinstr/joinstr.
     'DEFINES_MODULE' => 'YES',
     # Flutter.framework does not contain a i386 slice.
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
-    # Pull every object from the static archive into the binary that links it.
-    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/libjoinstr_flutter.a',
   }
-  # -export_dynamic must land on the executable's link (app / test host), where
-  # the dynamic symbol table is built; on the static-archive pod target it is a
-  # no-op. Dart loads via ExternalLibrary.process() (dlsym(RTLD_DEFAULT, ...)),
-  # so the frb runtime and wire symbols have to be exported there.
+  # The Rust archive only reaches the binary if the executable link force-loads
+  # it, so this must be on the app / test-host target, not the static-lib pod
+  # target. cargokit writes it under a PRODUCT_NAME subdir (build_pod.sh). Then
+  # -export_dynamic keeps the force-loaded globals in the dynamic symbol table
+  # for Dart's ExternalLibrary.process() (dlsym(RTLD_DEFAULT, ...)).
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-Wl,-export_dynamic',
+    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/joinstr_flutter/libjoinstr_flutter.a -Wl,-export_dynamic',
   }
 end
