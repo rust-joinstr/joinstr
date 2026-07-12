@@ -1,5 +1,6 @@
 use super::{Error, PEEK_BUFFER_SIZE};
 use openssl::ssl::{self, SslConnector, SslMethod, SslVerifyMode};
+use openssl::x509::X509;
 use std::{
     io::{BufRead, BufReader, Write},
     net,
@@ -8,6 +9,12 @@ use std::{
 };
 
 type SslStream = Arc<Mutex<ssl::SslStream<net::TcpStream>>>;
+
+/// Mozilla CA bundle, vendored so `ssl://` verification works on platforms
+/// whose native trust store the vendored OpenSSL cannot find, notably Android
+/// (its default `SSL_CERT_DIR` does not exist there). Refresh from
+/// https://curl.se/ca/cacert.pem.
+const CA_BUNDLE: &[u8] = include_bytes!("cacert.pem");
 
 #[derive(Debug)]
 pub struct SslClient {
@@ -80,6 +87,13 @@ impl SslClient {
         // do not verify for self-signed certs
         if !self.verif_certificate {
             ssl.set_verify(SslVerifyMode::NONE);
+        } else {
+            // Seed the trust store with the vendored roots so verification
+            // succeeds where the linked OpenSSL has no usable system store
+            // (Android). Added on top of any system roots.
+            for cert in X509::stack_from_pem(CA_BUNDLE).unwrap_or_default() {
+                let _ = ssl.cert_store_mut().add_cert(cert);
+            }
         }
         let ssl = ssl.build();
         let stream = net::TcpStream::connect(url).map_err(Error::TcpStream)?;

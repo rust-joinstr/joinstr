@@ -22,6 +22,32 @@ use websocket::{
 pub use nostr;
 pub use websocket;
 
+/// Mozilla CA bundle, vendored so `wss://` verification works on platforms
+/// whose native trust store the linked (vendored) OpenSSL cannot find, notably
+/// Android. Refresh from https://curl.se/ca/cacert.pem.
+const CA_BUNDLE: &str = include_str!("cacert.pem");
+
+/// Build a TLS connector that trusts the bundled roots.
+///
+/// `websocket`'s default (`connect(None)`) uses a native-tls connector seeded
+/// only from the system trust store. The vendored OpenSSL has no valid
+/// `SSL_CERT_DIR` on Android, so that store is empty and every `wss://`
+/// handshake fails verification. Seeding the connector with the bundled roots
+/// makes verification succeed there while still verifying (unlike disabling it).
+fn tls_connector() -> Result<websocket::native_tls::TlsConnector, Error> {
+    use websocket::native_tls::{Certificate, TlsConnector};
+    let mut builder = TlsConnector::builder();
+    for block in CA_BUNDLE.split_inclusive("-----END CERTIFICATE-----") {
+        let pem = block.trim_start();
+        if pem.starts_with("-----BEGIN CERTIFICATE-----") {
+            if let Ok(cert) = Certificate::from_pem(pem.as_bytes()) {
+                builder.add_root_certificate(cert);
+            }
+        }
+    }
+    builder.build().map_err(|_| Error::Tls)
+}
+
 const PING_INTERVAL: u64 = 5; // ping interval in seconds
 
 #[derive(Debug)]
@@ -42,6 +68,7 @@ pub enum Error {
     ConnectionClosed,
     RawRelayMessage,
     RelayMessage,
+    Tls,
 }
 
 impl From<WebSocketError> for Error {
@@ -130,7 +157,7 @@ impl WsClientBuilder {
         } else {
             return Err(Error::ArgMissing);
         };
-        let client = ClientBuilder::new(&url)?.connect(None)?;
+        let client = ClientBuilder::new(&url)?.connect(Some(tls_connector()?))?;
         client
             .set_nonblocking(true)
             .map_err(|_| Error::NonBlocking)?;
