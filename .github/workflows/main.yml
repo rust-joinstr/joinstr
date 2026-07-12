@@ -272,6 +272,25 @@ jobs:
       - name: build ios (simulator)
         working-directory: dart/example
         run: flutter build ios --debug --simulator
+      # Temporary diagnostic (non-fatal): does the linked binary contain
+      # frb_get_rust_content_hash, and is it exported? Absent from both = the
+      # static lib was not force-loaded in; present in nm but absent from nm -gU
+      # = force-loaded but not exported. Distinguishes the two failure modes.
+      - name: diagnose FFI symbol export (iOS)
+        working-directory: dart/example
+        run: |
+          set +e
+          find build "$HOME/Library/Developer/Xcode/DerivedData" \
+            -path '*Runner.app/Runner' -type f 2>/dev/null | while read -r app; do
+            echo "===== $app"
+            lipo -info "$app" 2>/dev/null
+            echo "-- frb symbols in binary (nm): $(nm "$app" 2>/dev/null | grep -c frb)"
+            nm "$app" 2>/dev/null | grep frb_get_rust_content_hash \
+              || echo "-- frb_get_rust_content_hash ABSENT from symbol table"
+            echo "-- exported frb symbols (nm -gU):"
+            nm -gU "$app" 2>/dev/null | grep frb | head || echo "   none exported"
+          done
+          true
       # Prove the boundary is not just linked but callable: init the runtime and
       # round-trip a few offline calls on a booted simulator. Deterministic (no
       # network), so it won't flake on relay/electrum availability.
