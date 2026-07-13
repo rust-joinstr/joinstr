@@ -522,6 +522,11 @@ impl Joinstr<'_> {
         };
         let pool_pubkey = inner.pool_as_ref()?.public_key;
         let role = inner.role;
+        // Whether this node contributes an output, i.e. is itself one of the
+        // `peers`. Per the NIP the initiator publishes its own address and so
+        // is a full peer; a node that only hosts the pool without committing an
+        // output (no address set) is not counted among `peers`.
+        let has_output = inner.output.is_some();
         let relay = inner.client.get_relay().ok_or(Error::RelaysMissing)?;
         drop(inner);
 
@@ -544,9 +549,21 @@ impl Joinstr<'_> {
             dummy_client.send_pool_message(&pool_pubkey, PoolMessage::Join(None))?;
         }
 
+        // Per the NIP, `peers` is the *total* number of participants that
+        // commit an output. The number of *other* participants this node waits
+        // to see join is therefore `peers - 1` when it contributes an output
+        // itself, and `peers` when it only hosts the pool. The initiator relies
+        // on this loop to hand out credentials, so undercounting here would
+        // leave a joiner un-credentialed and stranded.
+        let others = if has_output {
+            payload.peers.saturating_sub(1)
+        } else {
+            payload.peers
+        };
+
         let mut backoff = Backoff::new_us(WAIT);
         // register peers
-        while (now() < expired) && !(start_early && peers.len() >= payload.peers) {
+        while (now() < expired) && !(start_early && peers.len() >= others) {
             let mut inner = self.inner.lock().expect("poisoned");
             if let Ok(Some(msg)) = inner.client.try_receive_pool_msg() {
                 match (msg, matches!(inner.role, Role::Initiator)) {
@@ -643,8 +660,12 @@ impl Joinstr<'_> {
         let mut backoff = Backoff::new_us(WAIT);
 
         // register ouputs
+        // Collect until every participant's output is in: the local one seeded
+        // above plus the other `peers - 1`, i.e. `payload.peers` total. Keying
+        // off `peers.len()` here would stop one short whenever the initiator
+        // also commits an output, dropping a participant from the transaction.
         let expired = self.inner.lock().expect("poisoned").end_timeline()?;
-        while (now() < expired) && (coinjoin.outputs_len() < peers.len()) {
+        while (now() < expired) && (coinjoin.outputs_len() < payload.peers) {
             let mut inner = self.inner.lock().expect("poisoned");
             if let Ok(Some(msg)) = inner.client.try_receive_pool_msg() {
                 match msg {
@@ -691,15 +712,17 @@ impl Joinstr<'_> {
 
         if now() > expired {
             return Err(Error::Timeout);
-        } else if peers.len() < payload.peers {
-            return Err(Error::NotEnoughPeers(peers.len(), payload.peers));
-        } else if coinjoin.outputs_len() != peers.len() {
-            // NOTE: do not allow registered peer that not commit an output as it can be some
-            // lurkers trying deanonimyze peers
-
+        } else if peers.len() < others {
+            return Err(Error::NotEnoughPeers(peers.len(), others));
+        } else if coinjoin.outputs_len() != payload.peers {
+            // Every participant must have committed exactly one output before we
+            // finalize: `payload.peers` outputs for `payload.peers` participants.
+            // A mismatch means someone joined without registering an output, so
+            // the template is incomplete and we abort rather than build a
+            // partial transaction.
             return Err(Error::PeerCountNotMatch(
                 coinjoin.outputs_len(),
-                peers.len(),
+                payload.peers,
             ));
         }
         self.inner.lock().expect("poisoined").coinjoin = Some(coinjoin);

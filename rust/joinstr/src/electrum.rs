@@ -631,6 +631,25 @@ impl Client {
                     self.index.remove(&req_id);
                     return Ok(());
                 }
+            } else if let Response::Error(ErrorResponse { id, error }) = r {
+                if req_id == id {
+                    self.index.remove(&req_id);
+                    // The server rejected the broadcast (bad fee, conflicting
+                    // spend, non-final tx, ...). Surface its message rather than
+                    // reporting a generic desync, but the text is
+                    // server-controlled: strip ASCII control characters (which
+                    // could carry newlines or terminal escapes for log
+                    // injection) and clamp the length so a hostile server cannot
+                    // emit a multi-megabyte log line.
+                    const MAX_ERR_LEN: usize = 512;
+                    let sanitized: String = error
+                        .message
+                        .chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .take(MAX_ERR_LEN)
+                        .collect();
+                    return Err(Error::Electrum(sanitized));
+                }
             }
         }
         self.index.remove(&req_id);

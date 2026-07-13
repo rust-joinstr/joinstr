@@ -14,6 +14,14 @@ use self::{ssl_client::SslClient, tcp_client::TcpClient};
 // Using a 1 byte seek buffer
 pub const PEEK_BUFFER_SIZE: usize = 10;
 
+/// Upper bound on a single `\n`-terminated response line. The read loop caps
+/// growth here so a server that never sends a newline cannot exhaust memory.
+/// This bounds memory, not time: no read timeout is configured, so a server
+/// that dribbles bytes slowly without a newline still blocks the caller (a
+/// pre-existing slowloris shape, tracked separately). Comfortably above any
+/// real electrum reply.
+pub const MAX_LINE_LEN: usize = 16 * 1024 * 1024;
+
 #[derive(Debug)]
 pub enum Error {
     TcpStream(std::io::Error),
@@ -25,6 +33,7 @@ pub enum Error {
     AlreadyConnected,
     NotConnected,
     NotConfigured,
+    LineTooLong,
     ShutDown,
     SetNonBlocking,
     SetBlocking,
@@ -42,6 +51,43 @@ impl From<electrum::Error> for Error {
     fn from(value: electrum::Error) -> Self {
         Error::Electrum(value)
     }
+}
+
+/// Read exactly one `\n`-terminated line straight from `stream`.
+///
+/// Both the TCP and TLS clients need this identical framing: a per-call
+/// `BufReader` would pull the whole pending buffer in, return the first line,
+/// then drop the rest, silently losing electrum responses coalesced into the
+/// same segment/TLS record and desyncing every later request. Reading
+/// byte-by-byte never over-reads. The [`MAX_LINE_LEN`] cap bounds memory so a
+/// server that streams data without ever sending a newline cannot exhaust it.
+/// EOF returns whatever was accumulated; the terminating `\n` is kept in the
+/// line. A line may carry up to [`MAX_LINE_LEN`] content bytes before its `\n`
+/// (so a full-length line ending in `\n` is accepted); the `MAX_LINE_LEN + 1`-th
+/// non-newline byte is rejected with [`Error::LineTooLong`].
+pub(crate) fn read_line<R: std::io::Read>(stream: &mut R) -> Result<String, Error> {
+    read_line_capped(stream, MAX_LINE_LEN)
+}
+
+fn read_line_capped<R: std::io::Read>(stream: &mut R, max_len: usize) -> Result<String, Error> {
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if stream.read(&mut byte).map_err(Error::TcpStream)? == 0 {
+            break;
+        }
+        if byte[0] == b'\n' {
+            response.push(byte[0]);
+            break;
+        }
+        // Reject before storing the `max_len + 1`-th content byte, so a line of
+        // exactly `max_len` content bytes followed by `\n` is still accepted.
+        if response.len() >= max_len {
+            return Err(Error::LineTooLong);
+        }
+        response.push(byte[0]);
+    }
+    Ok(String::from_utf8_lossy(&response).into_owned())
 }
 
 #[derive(Debug, Default, Clone)]
@@ -280,5 +326,70 @@ impl Client {
             Client::Tcp(c) => c.close(),
             Client::Ssl(c) => c.close(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_line, read_line_capped, Error, MAX_LINE_LEN};
+
+    #[test]
+    fn read_line_single() {
+        let mut reader: &[u8] = b"hello\n";
+        assert_eq!(read_line(&mut reader).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn read_line_coalesced() {
+        // Two lines in one buffer: the first call must stop at the newline and
+        // leave the second line for the next call (the reader is not consumed
+        // past the newline). This is the desync the framing fix guards against.
+        let mut reader: &[u8] = b"first\nsecond\n";
+        assert_eq!(read_line(&mut reader).unwrap(), "first\n");
+        assert_eq!(read_line(&mut reader).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn read_line_eof_without_newline() {
+        let mut reader: &[u8] = b"no newline";
+        assert_eq!(read_line(&mut reader).unwrap(), "no newline");
+    }
+
+    #[test]
+    fn read_line_at_cap_with_newline_accepted() {
+        // A line of exactly MAX_LINE_LEN bytes ending in '\n' is accepted: the
+        // newline break happens before the cap check.
+        let mut buf = vec![b'a'; MAX_LINE_LEN - 1];
+        buf.push(b'\n');
+        let mut reader: &[u8] = &buf;
+        assert_eq!(read_line(&mut reader).unwrap().len(), MAX_LINE_LEN);
+    }
+
+    #[test]
+    fn read_line_over_cap_rejected() {
+        // MAX_LINE_LEN non-newline bytes trips the cap.
+        let buf = vec![b'a'; MAX_LINE_LEN + 1];
+        let mut reader: &[u8] = &buf;
+        assert!(matches!(read_line(&mut reader), Err(Error::LineTooLong)));
+    }
+
+    #[test]
+    fn read_line_capped_exact_cap_content_then_newline_accepted() {
+        // Exactly `cap` content bytes followed by '\n' is the accepted boundary.
+        let mut buf = vec![b'a'; 8];
+        buf.push(b'\n');
+        let mut reader: &[u8] = &buf;
+        assert_eq!(read_line_capped(&mut reader, 8).unwrap().len(), 9);
+    }
+
+    #[test]
+    fn read_line_capped_one_over_cap_rejected() {
+        // The `cap + 1`-th non-newline byte is rejected.
+        let buf = vec![b'a'; 9];
+        let mut reader: &[u8] = &buf;
+        assert!(matches!(
+            read_line_capped(&mut reader, 8),
+            Err(Error::LineTooLong)
+        ));
     }
 }

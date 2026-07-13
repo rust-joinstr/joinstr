@@ -1,6 +1,6 @@
 use super::{Error, PEEK_BUFFER_SIZE};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::Write,
     net,
     sync::{Arc, Mutex},
     time::Duration,
@@ -133,10 +133,7 @@ impl TcpClient {
 
         // If blocking or data in the TcpStream receiving end
         if blocking || peek.is_some() {
-            let mut response = String::new();
-            let mut reader = BufReader::new(stream.try_clone().map_err(Error::TcpStream)?);
-            reader.read_line(&mut response).map_err(Error::TcpStream)?;
-            Ok(Some(response))
+            Ok(Some(super::read_line(stream)?))
         } else {
             Ok(None)
         }

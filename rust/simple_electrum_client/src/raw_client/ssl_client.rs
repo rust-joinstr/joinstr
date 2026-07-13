@@ -1,7 +1,7 @@
 use super::{Error, PEEK_BUFFER_SIZE};
 use openssl::ssl::{self, SslConnector, SslMethod, SslVerifyMode};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::Write,
     net,
     sync::{Arc, Mutex},
     time::Duration,
@@ -154,10 +154,7 @@ impl SslClient {
 
         // If blocking or data in the receiving end of the stream
         if blocking || peek.is_some() {
-            let mut response = String::new();
-            let mut reader = BufReader::new(stream);
-            reader.read_line(&mut response).map_err(Error::TcpStream)?;
-            Ok(Some(response))
+            Ok(Some(super::read_line(stream)?))
         } else {
             Ok(None)
         }
