@@ -1,4 +1,8 @@
-use std::{fmt::Display, thread::sleep, time::Duration};
+use std::{
+    fmt::Display,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use bip39::Mnemonic;
 use bitcoin::{address::NetworkUnchecked, Address, Network, Txid};
@@ -233,10 +237,38 @@ pub fn list_pools(back: u64, timeout: u64, relay: String) -> Result<Vec<Pool>, E
     // subscribe to kind:2022 pool events published within the last `back` seconds
     pool_listener.subscribe_pools(back)?;
 
-    sleep(Duration::from_micros(timeout));
+    // Cap the number of pools we accept in a single window so a hostile relay
+    // that streams events for the whole window cannot exhaust memory. Generous
+    // enough to never clip a legitimate relay's pool list.
+    const MAX_POOLS: usize = 10_000;
 
-    while let Some(pool) = pool_listener.receive_pool_notification()? {
-        pools.push(pool)
+    // Poll for the whole window rather than sleeping once and draining at the
+    // end. A single trailing drain misses events (the relay delivers them to the
+    // live subscription, not on a late replay) and lets the idle connection
+    // drop; polling keeps it pumped and collects pools as they arrive.
+    let deadline = Instant::now() + Duration::from_micros(timeout);
+    'outer: while Instant::now() < deadline {
+        // Drain what is queued, but stop at the deadline so a relay that keeps
+        // the queue non-empty cannot hold us here past the timeout.
+        while Instant::now() < deadline {
+            match pool_listener.receive_pool_notification()? {
+                Some(pool) => {
+                    pools.push(pool);
+                    if pools.len() >= MAX_POOLS {
+                        break 'outer;
+                    }
+                }
+                None => break,
+            }
+        }
+        // Only sleep if there is time left, and never past the deadline: a
+        // trailing sleep on the last iteration would overshoot the timeout and
+        // impose a ~200ms floor even for a tiny window.
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        sleep(std::cmp::min(Duration::from_millis(200), deadline - now));
     }
 
     Ok(pools)
@@ -268,7 +300,10 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
     let client = Client::new(&url, port)?;
     signer.set_client(client);
 
-    joinstr_peer.start_coinjoin_blocking(None, Some(signer.clone()), || {})?;
+    // Pass the pool so the peer JOINS it. `start_coinjoin_blocking(None, ..)`
+    // takes the initiator branch and broadcasts a fresh pool instead, so the
+    // joiner would never connect to the pool it meant to join.
+    joinstr_peer.start_coinjoin_blocking(Some(pool), Some(signer.clone()), || {})?;
 
     let txid = joinstr_peer
         .final_tx()
