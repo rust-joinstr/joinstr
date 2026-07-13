@@ -4,7 +4,7 @@ use std::{
     net::TcpStream,
     sync::{
         mpsc::{self, Receiver, Sender},
-        Arc,
+        Arc, LazyLock,
     },
     time::{Duration, SystemTime},
 };
@@ -58,20 +58,27 @@ impl From<tungstenite::Error> for Error {
 
 type Message = String;
 
-/// Build a rustls client config using the `ring` crypto provider (rustls'
-/// default `aws-lc-rs` provider cannot be cross-compiled to Android) and the
-/// bundled Mozilla root set (webpki-roots), independent of any system trust
-/// store.
-fn tls_config() -> rustls::ClientConfig {
+/// A rustls client config using the `ring` crypto provider (rustls' default
+/// `aws-lc-rs` provider cannot be cross-compiled to Android) and the bundled
+/// Mozilla root set (webpki-roots), independent of any system trust store.
+/// Built once and shared: joinstr opens one relay connection per pool, so
+/// rebuilding the root store on every connect is wasteful.
+static TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
-    rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("ring provider supports the default protocol versions")
-        .with_root_certificates(root_store)
-        .with_no_client_auth()
+    Arc::new(
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports the default protocol versions")
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    )
+});
+
+fn tls_config() -> Arc<rustls::ClientConfig> {
+    TLS_CONFIG.clone()
 }
 
 /// The underlying `TcpStream`, whether the connection is plaintext (`ws://`) or
@@ -178,12 +185,22 @@ impl WsClientBuilder {
         // Force the `ring` provider by supplying our own rustls connector;
         // tungstenite's auto-negotiation would otherwise pick `aws-lc-rs`. For
         // plaintext `ws://` relays the connector is simply unused.
-        let connector = tungstenite::Connector::Rustls(Arc::new(tls_config()));
+        let connector = tungstenite::Connector::Rustls(tls_config());
+        // Bound tungstenite's defaults (64 MiB message / 16 MiB frame /
+        // unbounded write buffer): a hostile relay could otherwise push a huge
+        // frame at a phone, and the write buffer can grow without limit when a
+        // relay stops reading our non-blocking socket.
+        let ws_config = tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(512 * 1024),
+            max_frame_size: Some(256 * 1024),
+            max_write_buffer_size: 1024 * 1024,
+            ..Default::default()
+        };
         // The socket is still blocking here, so the handshake runs to
         // completion (never `Interrupted`).
         let (client, _resp) =
-            tungstenite::client_tls_with_config(request, tcp, None, Some(connector)).map_err(
-                |e| match e {
+            tungstenite::client_tls_with_config(request, tcp, Some(ws_config), Some(connector))
+                .map_err(|e| match e {
                     tungstenite::HandshakeError::Failure(err) => Error::WebSocket(Box::new(err)),
                     tungstenite::HandshakeError::Interrupted(_) => {
                         Error::WebSocket(Box::new(tungstenite::Error::Io(std::io::Error::new(
@@ -191,8 +208,7 @@ impl WsClientBuilder {
                             "handshake interrupted",
                         ))))
                     }
-                },
-            )?;
+                })?;
         tcp_stream(&client)
             .ok_or(Error::NonBlocking)?
             .set_nonblocking(true)
@@ -440,12 +456,13 @@ pub fn listen(mut client: Socket, sender: Sender<RecvMsg>, receiver: Receiver<Se
             // A `WouldBlock` IO error just means no message is ready: keep
             // looping, do not treat it as a disconnect.
             Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-                let _ = sender.send(RecvMsg::Close);
-                return;
-            }
+            // Any other read error (ConnectionClosed, AlreadyClosed, a hard Io
+            // like ECONNRESET, or a Protocol/Tls/Capacity fault) is fatal: the
+            // relay is gone, so signal Close and stop rather than spin forever.
             Err(e) => {
                 log::error!("listen(): read error: {:?}", e);
+                let _ = sender.send(RecvMsg::Close);
+                return;
             }
         }
 
