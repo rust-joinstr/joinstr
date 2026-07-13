@@ -1,4 +1,4 @@
-use super::{Error, PEEK_BUFFER_SIZE};
+use super::Error;
 use std::{
     io::Write,
     net,
@@ -160,36 +160,63 @@ impl SslClient {
         Ok(())
     }
 
-    /// Is there data ready to be read without blocking?
+    /// Is there application **plaintext** ready to be read without blocking?
     ///
-    /// Mirrors the openssl `ssl_peek` behavior: prefer plaintext already
-    /// decrypted and buffered by rustls (a single TLS record can carry several
-    /// coalesced response lines), and otherwise peek the underlying socket for
-    /// pending (still-encrypted) bytes.
+    /// Only decrypted application data counts. Peeking the raw socket would
+    /// report non-application TLS records (most importantly the TLS 1.3
+    /// `NewSessionTicket` real electrum servers send right after the handshake,
+    /// but also key-updates/alerts or a TCP-fragmented partial record) as
+    /// "data ready"; `read_line` would then block forever on a socket with no
+    /// plaintext behind it. So we check rustls' decrypted buffer, and if it is
+    /// empty pump any pending records non-blocking and re-check, never treating
+    /// raw encrypted bytes as a readable line.
     fn data_available(stream: &mut TlsStream) -> Result<bool, Error> {
-        let buffered = stream
-            .conn
-            .process_new_packets()
-            .map(|io| io.plaintext_bytes_to_read() > 0)
-            .unwrap_or(false);
-        if buffered {
+        if Self::plaintext_ready(stream)? {
             return Ok(true);
         }
 
-        let mut peek_buffer = [0u8; PEEK_BUFFER_SIZE];
-        // The socket blocks on peek() unless non-blocking is set.
         stream
             .sock
             .set_nonblocking(true)
             .map_err(|_| Error::SetNonBlocking)?;
-        // peek() errors when there is no data in the receiving end.
-        let peek = stream.sock.peek(&mut peek_buffer).ok();
+        let pumped = Self::pump_tls(stream);
         stream
             .sock
             .set_nonblocking(false)
             .map_err(|_| Error::SetBlocking)?;
+        pumped
+    }
 
-        Ok(peek.is_some())
+    /// Plaintext already decrypted and buffered by rustls (a single TLS record
+    /// can carry several coalesced response lines). A TLS-layer error here is
+    /// propagated rather than masked as "no data", so a broken connection is
+    /// surfaced instead of spinning the subscription loop forever.
+    fn plaintext_ready(stream: &mut TlsStream) -> Result<bool, Error> {
+        Ok(stream
+            .conn
+            .process_new_packets()
+            .map_err(Error::Tls)?
+            .plaintext_bytes_to_read()
+            > 0)
+    }
+
+    /// Read whatever TLS records are pending on the (non-blocking) socket and
+    /// report whether any yielded application plaintext. `WouldBlock` and a
+    /// clean EOF both mean "nothing readable yet".
+    fn pump_tls(stream: &mut TlsStream) -> Result<bool, Error> {
+        while stream.conn.wants_read() {
+            match stream.conn.read_tls(&mut stream.sock) {
+                Ok(0) => return Ok(false),
+                Ok(_) => {
+                    if Self::plaintext_ready(stream)? {
+                        return Ok(true);
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) => return Err(Error::TcpStream(e)),
+            }
+        }
+        Ok(false)
     }
 
     fn raw_read(stream: &mut TlsStream, blocking: bool) -> Result<Option<String>, Error> {
