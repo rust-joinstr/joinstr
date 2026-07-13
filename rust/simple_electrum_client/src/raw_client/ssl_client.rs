@@ -2,12 +2,29 @@ use super::Error;
 use std::{
     io::Write,
     net,
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
 type TlsStream = rustls::StreamOwned<rustls::ClientConnection, net::TcpStream>;
 type SharedStream = Arc<Mutex<TlsStream>>;
+
+/// Verifying rustls config (bundled Mozilla roots, `ring` provider), built once
+/// and shared: joinstr opens one connection per pool, so rebuilding the root
+/// store and provider on every `try_connect` is wasteful.
+static VERIFYING_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    Arc::new(
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports the default protocol versions")
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    )
+});
 
 #[derive(Debug)]
 pub struct SslClient {
@@ -77,38 +94,32 @@ impl SslClient {
     pub fn try_connect(&mut self) -> Result<(), Error> {
         let addr = format!("{}:{}", self.url, self.port);
 
-        // Always use the `ring` crypto provider: rustls' default `aws-lc-rs`
-        // provider cannot be cross-compiled to Android.
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let builder = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("ring provider supports the default protocol versions");
-
         let config = if self.verif_certificate {
             // Verify the server certificate against the bundled Mozilla root
-            // set (webpki-roots), independent of any system trust store.
-            let root_store = rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            };
-            builder
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
+            // set (webpki-roots), independent of any system trust store. Reuse
+            // the cached config to avoid rebuilding the root store per connect.
+            VERIFYING_TLS_CONFIG.clone()
         } else {
             // DANGEROUS: certificate verification disabled. Reached only when
             // `verif_certificate == false`, i.e. for self-signed regtest/dev
-            // servers.
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(
-                    Arc::new(danger::NoCertificateVerification::new()),
-                )
-                .with_no_client_auth()
+            // servers. Always use the `ring` crypto provider: rustls' default
+            // `aws-lc-rs` provider cannot be cross-compiled to Android.
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            Arc::new(
+                rustls::ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .expect("ring provider supports the default protocol versions")
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(
+                        danger::NoCertificateVerification::new(),
+                    ))
+                    .with_no_client_auth(),
+            )
         };
 
         let server_name = rustls::pki_types::ServerName::try_from(self.url.clone())
             .map_err(|_| Error::InvalidDnsName)?;
-        let conn =
-            rustls::ClientConnection::new(Arc::new(config), server_name).map_err(Error::Tls)?;
+        let conn = rustls::ClientConnection::new(config, server_name).map_err(Error::Tls)?;
 
         let sock = net::TcpStream::connect(addr).map_err(Error::TcpStream)?;
         sock.set_read_timeout(self.read_timeout)
@@ -116,7 +127,29 @@ impl SslClient {
         sock.set_write_timeout(self.write_timeout)
             .map_err(Error::TcpStream)?;
 
-        let stream = Arc::new(Mutex::new(rustls::StreamOwned::new(conn, sock)));
+        // `StreamOwned::new` does no IO, so the handshake would otherwise be
+        // deferred to the first read/write and a bad certificate would surface
+        // as `Error::TcpStream` on the first send (indistinguishable from the
+        // network being down). Drive it to completion here, while the socket is
+        // still blocking, so verification happens at connect: a rustls TLS
+        // failure (expired/self-signed/wrong-host cert) is wrapped by
+        // `complete_io` in an `io::Error` whose inner error is a `rustls::Error`,
+        // which we downcast back to `Error::Tls`; any other IO failure stays
+        // `Error::TcpStream`.
+        let mut stream = rustls::StreamOwned::new(conn, sock);
+        while stream.conn.is_handshaking() {
+            if let Err(e) = stream.conn.complete_io(&mut stream.sock) {
+                let kind = e.kind();
+                return Err(match e.into_inner() {
+                    Some(inner) => match inner.downcast::<rustls::Error>() {
+                        Ok(tls) => Error::Tls(*tls),
+                        Err(other) => Error::TcpStream(std::io::Error::new(kind, other)),
+                    },
+                    None => Error::TcpStream(std::io::Error::from(kind)),
+                });
+            }
+        }
+        let stream = Arc::new(Mutex::new(stream));
 
         if self.stream.is_none() {
             self.stream = Some(stream);
@@ -238,9 +271,14 @@ impl SslClient {
 
     pub fn close(&mut self) -> Result<(), Error> {
         if let Some(stream) = self.stream.take() {
+            let mut guard = stream.try_lock().map_err(|_| Error::Mutex)?;
+            let stream = &mut *guard;
+            // Best-effort TLS close_notify before the TCP shutdown so the peer
+            // can distinguish a clean close from a truncation attack.
+            stream.conn.send_close_notify();
+            let _ = stream.conn.write_tls(&mut stream.sock);
+            let _ = stream.flush();
             stream
-                .try_lock()
-                .map_err(|_| Error::Mutex)?
                 .sock
                 .shutdown(net::Shutdown::Both)
                 .map_err(|_| Error::ShutDown)?;
