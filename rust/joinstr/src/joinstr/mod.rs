@@ -715,9 +715,11 @@ impl Joinstr<'_> {
         } else if peers.len() < others {
             return Err(Error::NotEnoughPeers(peers.len(), others));
         } else if coinjoin.outputs_len() != payload.peers {
-            // NOTE: do not allow registered peer that not commit an output as it can be some
-            // lurkers trying deanonimyze peers
-
+            // Every participant must have committed exactly one output before we
+            // finalize: `payload.peers` outputs for `payload.peers` participants.
+            // A mismatch means someone joined without registering an output, so
+            // the template is incomplete and we abort rather than build a
+            // partial transaction.
             return Err(Error::PeerCountNotMatch(
                 coinjoin.outputs_len(),
                 payload.peers,

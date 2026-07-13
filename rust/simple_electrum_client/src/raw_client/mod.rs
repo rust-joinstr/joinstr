@@ -15,9 +15,11 @@ use self::{ssl_client::SslClient, tcp_client::TcpClient};
 pub const PEEK_BUFFER_SIZE: usize = 10;
 
 /// Upper bound on a single `\n`-terminated response line. The read loop caps
-/// growth here so a server that streams data without ever sending a newline
-/// cannot exhaust memory (the socket read timeout only fires on *no* data, not
-/// on an endless stream). Comfortably above any real electrum reply.
+/// growth here so a server that never sends a newline cannot exhaust memory.
+/// This bounds memory, not time: no read timeout is configured, so a server
+/// that dribbles bytes slowly without a newline still blocks the caller (a
+/// pre-existing slowloris shape, tracked separately). Comfortably above any
+/// real electrum reply.
 pub const MAX_LINE_LEN: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
