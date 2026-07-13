@@ -1,7 +1,11 @@
 use std::{
     fmt::Debug,
     io::ErrorKind,
-    sync::mpsc::{self, Receiver, Sender},
+    net::TcpStream,
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -14,20 +18,22 @@ use nostr::{
     types::{Filter, Timestamp},
     util::JsonUtil,
 };
-use websocket::{
-    stream::sync::NetworkStream, sync::Client, url::ParseError, ClientBuilder, OwnedMessage,
-    WebSocketError,
+use tungstenite::{
+    client::IntoClientRequest, stream::MaybeTlsStream, Message as WsMessage, WebSocket,
 };
 
 pub use nostr;
-pub use websocket;
+pub use tungstenite;
 
 const PING_INTERVAL: u64 = 5; // ping interval in seconds
 
+type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
+
 #[derive(Debug)]
 pub enum Error {
-    WebSocket(WebSocketError),
-    Parse(ParseError),
+    // Boxed: `tungstenite::Error` embeds an `http::Response`, so keeping it
+    // inline would make every `Result<_, Error>` large (clippy::result_large_err).
+    WebSocket(Box<tungstenite::Error>),
     Listen,
     Send,
     Receive,
@@ -44,19 +50,39 @@ pub enum Error {
     RelayMessage,
 }
 
-impl From<WebSocketError> for Error {
-    fn from(value: WebSocketError) -> Self {
-        Self::WebSocket(value)
-    }
-}
-
-impl From<ParseError> for Error {
-    fn from(value: ParseError) -> Self {
-        Self::Parse(value)
+impl From<tungstenite::Error> for Error {
+    fn from(value: tungstenite::Error) -> Self {
+        Self::WebSocket(Box::new(value))
     }
 }
 
 type Message = String;
+
+/// Build a rustls client config using the `ring` crypto provider (rustls'
+/// default `aws-lc-rs` provider cannot be cross-compiled to Android) and the
+/// bundled Mozilla root set (webpki-roots), independent of any system trust
+/// store.
+fn tls_config() -> rustls::ClientConfig {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring provider supports the default protocol versions")
+        .with_root_certificates(root_store)
+        .with_no_client_auth()
+}
+
+/// The underlying `TcpStream`, whether the connection is plaintext (`ws://`) or
+/// TLS (`wss://`).
+fn tcp_stream(ws: &Socket) -> &TcpStream {
+    match ws.get_ref() {
+        MaybeTlsStream::Plain(s) => s,
+        MaybeTlsStream::Rustls(s) => &s.sock,
+        _ => unreachable!("only the rustls TLS backend is enabled"),
+    }
+}
 
 #[derive(Debug)]
 pub enum SendMsg {
@@ -71,7 +97,7 @@ pub enum RecvMsg {
 }
 
 pub struct WsClient {
-    client: Option<Client<Box<dyn NetworkStream + Send>>>,
+    client: Option<Socket>,
     sender: Sender<SendMsg>,
     ws_receiver: Option<Receiver<SendMsg>>,
     receiver: Receiver<RecvMsg>,
@@ -130,10 +156,42 @@ impl WsClientBuilder {
         } else {
             return Err(Error::ArgMissing);
         };
-        let client = ClientBuilder::new(&url)?.connect(None)?;
-        client
+
+        let request = url.as_str().into_client_request()?;
+        let uri = request.uri();
+        let host = uri.host().ok_or(Error::ArgMissing)?.to_string();
+        let port = uri
+            .port_u16()
+            .unwrap_or(if uri.scheme_str() == Some("wss") {
+                443
+            } else {
+                80
+            });
+        let tcp = TcpStream::connect((host.as_str(), port))
+            .map_err(|e| Error::WebSocket(Box::new(tungstenite::Error::Io(e))))?;
+
+        // Force the `ring` provider by supplying our own rustls connector;
+        // tungstenite's auto-negotiation would otherwise pick `aws-lc-rs`. For
+        // plaintext `ws://` relays the connector is simply unused.
+        let connector = tungstenite::Connector::Rustls(Arc::new(tls_config()));
+        // The socket is still blocking here, so the handshake runs to
+        // completion (never `Interrupted`).
+        let (client, _resp) =
+            tungstenite::client_tls_with_config(request, tcp, None, Some(connector)).map_err(
+                |e| match e {
+                    tungstenite::HandshakeError::Failure(err) => Error::WebSocket(Box::new(err)),
+                    tungstenite::HandshakeError::Interrupted(_) => {
+                        Error::WebSocket(Box::new(tungstenite::Error::Io(std::io::Error::new(
+                            ErrorKind::WouldBlock,
+                            "handshake interrupted",
+                        ))))
+                    }
+                },
+            )?;
+        tcp_stream(&client)
             .set_nonblocking(true)
             .map_err(|_| Error::NonBlocking)?;
+
         let (sender, ws_receiver) = mpsc::channel();
         let (ws_sender, receiver) = mpsc::channel();
         let mut client = WsClient {
@@ -321,11 +379,7 @@ impl Drop for WsClient {
     }
 }
 
-pub fn listen(
-    mut client: Client<Box<dyn NetworkStream + Send>>,
-    sender: Sender<RecvMsg>,
-    receiver: Receiver<SendMsg>,
-) {
+pub fn listen(mut client: Socket, sender: Sender<RecvMsg>, receiver: Receiver<SendMsg>) {
     let mut backoff = Backoff::new_us(50);
 
     let mut last_ping = SystemTime::now();
@@ -337,7 +391,7 @@ pub fn listen(
             Ok(m) => match m {
                 SendMsg::Msg(m) => {
                     wait = false;
-                    if let Err(e) = client.send_message(&websocket::Message::text(m)) {
+                    if let Err(e) = client.send(WsMessage::text(m)) {
                         log::error!("listen(): fail to send message: {:?}", e);
                     }
                 }
@@ -347,52 +401,40 @@ pub fn listen(
             _ => return,
         }
 
-        match client.recv_message() {
+        match client.read() {
             Ok(m) => {
                 wait = false;
                 match m {
-                    OwnedMessage::Text(m) => {
+                    WsMessage::Text(m) => {
                         log::debug!("recv text: {:?}", m);
                         let _ = sender.send(RecvMsg::Msg(m));
                     }
-                    OwnedMessage::Binary(m) => {
+                    WsMessage::Binary(m) => {
                         log::error!("listen() unexpected binary message {:?}", m);
                     }
-                    OwnedMessage::Close(_) => {
+                    WsMessage::Close(_) => {
                         log::debug!("recv: Close ");
                         sender.send(RecvMsg::Close).expect("main thread panicked");
                     }
-                    OwnedMessage::Ping(nonce) => {
-                        _ = client.send_message(&OwnedMessage::Pong(nonce));
+                    WsMessage::Ping(nonce) => {
+                        _ = client.send(WsMessage::Pong(nonce));
                     }
-                    OwnedMessage::Pong(_) => {
+                    WsMessage::Pong(_) => {
                         last_pong = SystemTime::now();
                     }
+                    WsMessage::Frame(_) => {}
                 }
             }
-            Err(e) => match e {
-                WebSocketError::ProtocolError(_e) => {
-                    // FIXME:: why do we receive a bunch of protocols errors at startup?
-                    // log::error!("ProtocolError: {:?}", e);
-                }
-                WebSocketError::DataFrameError(_e) => {
-                    // FIXME: why do we receive a bunch of "Expected unmasked data frame" at startup?
-                    // log::error!("DataFrameError: {:?}", e);
-                }
-                WebSocketError::NoDataAvailable => {}
-                WebSocketError::IoError(e) => {
-                    if e.kind() == ErrorKind::WouldBlock {
-                    } else {
-                        log::error!("{:?}", e);
-                    }
-                }
-                WebSocketError::Utf8Error(e) => {
-                    log::error!("{:?}", e);
-                }
-                WebSocketError::Other(e) => {
-                    log::error!("{:?}", e);
-                }
-            },
+            // A `WouldBlock` IO error just means no message is ready: keep
+            // looping, do not treat it as a disconnect.
+            Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                let _ = sender.send(RecvMsg::Close);
+                return;
+            }
+            Err(e) => {
+                log::error!("listen(): read error: {:?}", e);
+            }
         }
 
         if SystemTime::now()
@@ -402,7 +444,7 @@ pub fn listen(
         {
             last_ping = SystemTime::now();
             ping_nonce = ping_nonce.wrapping_add(1);
-            _ = client.send_message(&OwnedMessage::Ping(vec![ping_nonce]));
+            _ = client.send(WsMessage::Ping(vec![ping_nonce]));
         }
 
         if SystemTime::now()

@@ -1,5 +1,4 @@
 use super::{Error, PEEK_BUFFER_SIZE};
-use openssl::ssl::{self, SslConnector, SslMethod, SslVerifyMode};
 use std::{
     io::Write,
     net,
@@ -7,13 +6,14 @@ use std::{
     time::Duration,
 };
 
-type SslStream = Arc<Mutex<ssl::SslStream<net::TcpStream>>>;
+type TlsStream = rustls::StreamOwned<rustls::ClientConnection, net::TcpStream>;
+type SharedStream = Arc<Mutex<TlsStream>>;
 
 #[derive(Debug)]
 pub struct SslClient {
     url: String,
     port: u16,
-    pub(crate) stream: Option<SslStream>,
+    pub(crate) stream: Option<SharedStream>,
     pub(crate) read_timeout: Option<Duration>,
     pub(crate) write_timeout: Option<Duration>,
     pub(crate) verif_certificate: bool,
@@ -75,22 +75,48 @@ impl SslClient {
     }
 
     pub fn try_connect(&mut self) -> Result<(), Error> {
-        let url = format!("{}:{}", self.url, self.port);
-        let mut ssl = SslConnector::builder(SslMethod::tls()).unwrap();
-        // do not verify for self-signed certs
-        if !self.verif_certificate {
-            ssl.set_verify(SslVerifyMode::NONE);
-        }
-        let ssl = ssl.build();
-        let stream = net::TcpStream::connect(url).map_err(Error::TcpStream)?;
-        stream
-            .set_read_timeout(self.read_timeout)
+        let addr = format!("{}:{}", self.url, self.port);
+
+        // Always use the `ring` crypto provider: rustls' default `aws-lc-rs`
+        // provider cannot be cross-compiled to Android.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let builder = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports the default protocol versions");
+
+        let config = if self.verif_certificate {
+            // Verify the server certificate against the bundled Mozilla root
+            // set (webpki-roots), independent of any system trust store.
+            let root_store = rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
+            builder
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        } else {
+            // DANGEROUS: certificate verification disabled. Reached only when
+            // `verif_certificate == false`, i.e. for self-signed regtest/dev
+            // servers.
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(
+                    Arc::new(danger::NoCertificateVerification::new()),
+                )
+                .with_no_client_auth()
+        };
+
+        let server_name = rustls::pki_types::ServerName::try_from(self.url.clone())
+            .map_err(|_| Error::InvalidDnsName)?;
+        let conn =
+            rustls::ClientConnection::new(Arc::new(config), server_name).map_err(Error::Tls)?;
+
+        let sock = net::TcpStream::connect(addr).map_err(Error::TcpStream)?;
+        sock.set_read_timeout(self.read_timeout)
             .map_err(Error::TcpStream)?;
-        stream
-            .set_write_timeout(self.write_timeout)
+        sock.set_write_timeout(self.write_timeout)
             .map_err(Error::TcpStream)?;
-        let stream = ssl.connect(&self.url, stream).map_err(Error::SslStream)?;
-        let stream = Arc::new(Mutex::new(stream));
+
+        let stream = Arc::new(Mutex::new(rustls::StreamOwned::new(conn, sock)));
 
         if self.stream.is_none() {
             self.stream = Some(stream);
@@ -102,9 +128,9 @@ impl SslClient {
 
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         if let Some(stream) = self.stream.as_mut() {
-            let mut stream = stream.lock().map_err(|_| Error::Mutex)?;
+            let stream = stream.lock().map_err(|_| Error::Mutex)?;
             stream
-                .get_mut()
+                .sock
                 .set_read_timeout(timeout)
                 .map_err(Error::TcpStream)?;
         }
@@ -114,9 +140,9 @@ impl SslClient {
 
     pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         if let Some(stream) = self.stream.as_mut() {
-            let mut stream = stream.lock().map_err(|_| Error::Mutex)?;
+            let stream = stream.lock().map_err(|_| Error::Mutex)?;
             stream
-                .get_mut()
+                .sock
                 .set_write_timeout(timeout)
                 .map_err(Error::TcpStream)?;
         }
@@ -124,7 +150,7 @@ impl SslClient {
         Ok(())
     }
 
-    pub fn send(stream: &mut ssl::SslStream<net::TcpStream>, request: &str) -> Result<(), Error> {
+    pub fn send(stream: &mut TlsStream, request: &str) -> Result<(), Error> {
         stream
             .write_all(request.as_bytes())
             .map_err(Error::TcpStream)?;
@@ -134,37 +160,52 @@ impl SslClient {
         Ok(())
     }
 
-    fn raw_read(
-        stream: &mut ssl::SslStream<net::TcpStream>,
-        blocking: bool,
-    ) -> Result<Option<String>, Error> {
+    /// Is there data ready to be read without blocking?
+    ///
+    /// Mirrors the openssl `ssl_peek` behavior: prefer plaintext already
+    /// decrypted and buffered by rustls (a single TLS record can carry several
+    /// coalesced response lines), and otherwise peek the underlying socket for
+    /// pending (still-encrypted) bytes.
+    fn data_available(stream: &mut TlsStream) -> Result<bool, Error> {
+        let buffered = stream
+            .conn
+            .process_new_packets()
+            .map(|io| io.plaintext_bytes_to_read() > 0)
+            .unwrap_or(false);
+        if buffered {
+            return Ok(true);
+        }
+
         let mut peek_buffer = [0u8; PEEK_BUFFER_SIZE];
-        // SslStream will block if `nonblocking` is false
+        // The socket blocks on peek() unless non-blocking is set.
         stream
-            .get_mut()
+            .sock
             .set_nonblocking(true)
             .map_err(|_| Error::SetNonBlocking)?;
-        // SslStream.ssl_peek() will error if there is no data in the
-        // stream receiving end
-        let peek = stream.ssl_peek(&mut peek_buffer).ok();
+        // peek() errors when there is no data in the receiving end.
+        let peek = stream.sock.peek(&mut peek_buffer).ok();
         stream
-            .get_mut()
+            .sock
             .set_nonblocking(false)
             .map_err(|_| Error::SetBlocking)?;
 
+        Ok(peek.is_some())
+    }
+
+    fn raw_read(stream: &mut TlsStream, blocking: bool) -> Result<Option<String>, Error> {
         // If blocking or data in the receiving end of the stream
-        if blocking || peek.is_some() {
+        if blocking || Self::data_available(stream)? {
             Ok(Some(super::read_line(stream)?))
         } else {
             Ok(None)
         }
     }
 
-    pub fn try_read(stream: &mut ssl::SslStream<net::TcpStream>) -> Result<Option<String>, Error> {
+    pub fn try_read(stream: &mut TlsStream) -> Result<Option<String>, Error> {
         Self::raw_read(stream, false)
     }
 
-    pub fn read(stream: &mut ssl::SslStream<net::TcpStream>) -> Result<String, Error> {
+    pub fn read(stream: &mut TlsStream) -> Result<String, Error> {
         Ok(Self::raw_read(stream, true)?.expect("blocking"))
     }
 
@@ -173,11 +214,69 @@ impl SslClient {
             stream
                 .try_lock()
                 .map_err(|_| Error::Mutex)?
-                .shutdown()
+                .sock
+                .shutdown(net::Shutdown::Both)
                 .map_err(|_| Error::ShutDown)?;
             Ok(())
         } else {
             Err(Error::NotConnected)
+        }
+    }
+}
+
+/// A rustls `ServerCertVerifier` that accepts any server certificate.
+///
+/// DANGEROUS: only used by [`SslClient::try_connect`] when
+/// `verif_certificate == false` (self-signed regtest/dev servers). Handshake
+/// signatures are still checked with the `ring` provider; only the certificate
+/// chain/identity is left unverified.
+mod danger {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct NoCertificateVerification(rustls::crypto::WebPkiSupportedAlgorithms);
+
+    impl NoCertificateVerification {
+        pub fn new() -> Self {
+            Self(ring::default_provider().signature_verification_algorithms)
+        }
+    }
+
+    impl ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls12_signature(message, cert, dss, &self.0)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls13_signature(message, cert, dss, &self.0)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.0.supported_schemes()
         }
     }
 }

@@ -1,7 +1,7 @@
 pub(crate) mod ssl_client;
 pub(crate) mod tcp_client;
 
-use std::{collections::HashMap, fmt::Display, net, thread, time::Duration};
+use std::{collections::HashMap, fmt::Display, thread, time::Duration};
 
 use crate::electrum::{
     self,
@@ -25,11 +25,10 @@ pub const MAX_LINE_LEN: usize = 16 * 1024 * 1024;
 #[derive(Debug)]
 pub enum Error {
     TcpStream(std::io::Error),
-    SslStream(openssl::ssl::HandshakeError<net::TcpStream>),
+    Tls(rustls::Error),
+    InvalidDnsName,
     Electrum(electrum::Error),
-    SslPeek,
     Mutex,
-    SslConnector(std::io::Error),
     AlreadyConnected,
     NotConnected,
     NotConfigured,

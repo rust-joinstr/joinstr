@@ -26,7 +26,6 @@ log = { workspace = true }
 rand = { workspace = true }
 simple_nostr_client = { workspace = true }
 simple_electrum_client = { workspace = true }
-native-tls = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

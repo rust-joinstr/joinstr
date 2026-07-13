@@ -23,18 +23,18 @@ backoff = { path = "rust/backoff" }
 libc = "0.2.170"
 log = "0.4.20"
 miniscript = "12.2.0"
-native-tls = "=0.2.13"
 nostr = "0.35.0"
 nostr-sdk = "0.35.0"
 nostrd = { git = "https://github.com/pythcoiner/nostrd.git", branch = "master" }
-openssl = "0.10.66"
 rand = "0.9.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = "1.0.218"
 serde_json = "1.0.128"
 simple_electrum_client = { path = "rust/simple_electrum_client" }
 simple_nostr_client = { path = "rust/simple_nostr_client" }
 tokio = "1.40.0"
-websocket = { version = "0.27.1", default-features = false }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+webpki-roots = "0.26"
 zeroize = "1"
 
 [patch."https://github.com/pythcoiner/joinstr"]
