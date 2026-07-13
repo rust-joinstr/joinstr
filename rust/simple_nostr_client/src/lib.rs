@@ -76,11 +76,14 @@ fn tls_config() -> rustls::ClientConfig {
 
 /// The underlying `TcpStream`, whether the connection is plaintext (`ws://`) or
 /// TLS (`wss://`).
-fn tcp_stream(ws: &Socket) -> &TcpStream {
+fn tcp_stream(ws: &Socket) -> Option<&TcpStream> {
+    // `MaybeTlsStream` is `#[non_exhaustive]`; only the rustls and plaintext
+    // backends are compiled in, but return `None` rather than panicking should
+    // a future variant appear.
     match ws.get_ref() {
-        MaybeTlsStream::Plain(s) => s,
-        MaybeTlsStream::Rustls(s) => &s.sock,
-        _ => unreachable!("only the rustls TLS backend is enabled"),
+        MaybeTlsStream::Plain(s) => Some(s),
+        MaybeTlsStream::Rustls(s) => Some(&s.sock),
+        _ => None,
     }
 }
 
@@ -167,6 +170,8 @@ impl WsClientBuilder {
             } else {
                 80
             });
+        // `connect` walks every resolved address (v4 and v6) until one works,
+        // which matters on dual-stack networks where the first is unreachable.
         let tcp = TcpStream::connect((host.as_str(), port))
             .map_err(|e| Error::WebSocket(Box::new(tungstenite::Error::Io(e))))?;
 
@@ -189,6 +194,7 @@ impl WsClientBuilder {
                 },
             )?;
         tcp_stream(&client)
+            .ok_or(Error::NonBlocking)?
             .set_nonblocking(true)
             .map_err(|_| Error::NonBlocking)?;
 
@@ -391,8 +397,13 @@ pub fn listen(mut client: Socket, sender: Sender<RecvMsg>, receiver: Receiver<Se
             Ok(m) => match m {
                 SendMsg::Msg(m) => {
                     wait = false;
-                    if let Err(e) = client.send(WsMessage::text(m)) {
-                        log::error!("listen(): fail to send message: {:?}", e);
+                    match client.send(WsMessage::text(m)) {
+                        Ok(()) => {}
+                        // On the non-blocking socket a full write buffers in
+                        // tungstenite and flushes on a later call, so this is
+                        // not a lost frame, just backpressure.
+                        Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
+                        Err(e) => log::error!("listen(): fail to send message: {:?}", e),
                     }
                 }
                 SendMsg::Stop => return,
@@ -416,8 +427,9 @@ pub fn listen(mut client: Socket, sender: Sender<RecvMsg>, receiver: Receiver<Se
                         log::debug!("recv: Close ");
                         sender.send(RecvMsg::Close).expect("main thread panicked");
                     }
-                    WsMessage::Ping(nonce) => {
-                        _ = client.send(WsMessage::Pong(nonce));
+                    WsMessage::Ping(_) => {
+                        // tungstenite auto-queues the Pong on read(); a manual
+                        // reply here would send a redundant second pong.
                     }
                     WsMessage::Pong(_) => {
                         last_pong = SystemTime::now();
