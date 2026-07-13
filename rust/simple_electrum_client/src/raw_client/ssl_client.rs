@@ -1,13 +1,20 @@
 use super::Error;
 use std::{
     io::Write,
-    net,
+    net::{self, ToSocketAddrs},
     sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
 type TlsStream = rustls::StreamOwned<rustls::ClientConnection, net::TcpStream>;
 type SharedStream = Arc<Mutex<TlsStream>>;
+
+/// Bound the TCP connect and the TLS handshake so a server that accepts the
+/// connection and then stalls cannot hang `try_connect` (and thus
+/// `Client::new`) forever. Superseded by the caller's own timeouts once the
+/// handshake completes.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Verifying rustls config (bundled Mozilla roots, `ring` provider), built once
 /// and shared: joinstr opens one connection per pool, so rebuilding the root
@@ -121,10 +128,24 @@ impl SslClient {
             .map_err(|_| Error::InvalidDnsName)?;
         let conn = rustls::ClientConnection::new(config, server_name).map_err(Error::Tls)?;
 
-        let sock = net::TcpStream::connect(addr).map_err(Error::TcpStream)?;
-        sock.set_read_timeout(self.read_timeout)
+        // Try every resolved address (v4 and v6) with a bounded connect, so a
+        // dead first record neither hangs nor fails the whole attempt.
+        let mut last_err = None;
+        let sock = 'connect: {
+            for a in addr.to_socket_addrs().map_err(Error::TcpStream)? {
+                match net::TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
+                    Ok(s) => break 'connect s,
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            return Err(Error::TcpStream(last_err.unwrap_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no address resolved")
+            })));
+        };
+        // Bound the handshake below; restored to the caller's timeouts after.
+        sock.set_read_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(Error::TcpStream)?;
-        sock.set_write_timeout(self.write_timeout)
+        sock.set_write_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(Error::TcpStream)?;
 
         // `StreamOwned::new` does no IO, so the handshake would otherwise be
@@ -149,6 +170,16 @@ impl SslClient {
                 });
             }
         }
+        // Handshake done: hand the socket back to the caller's timeout policy
+        // (both default to blocking/None) for normal request/response reads.
+        stream
+            .sock
+            .set_read_timeout(self.read_timeout)
+            .map_err(Error::TcpStream)?;
+        stream
+            .sock
+            .set_write_timeout(self.write_timeout)
+            .map_err(Error::TcpStream)?;
         let stream = Arc::new(Mutex::new(stream));
 
         if self.stream.is_none() {

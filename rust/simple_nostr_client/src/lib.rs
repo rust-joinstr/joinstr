@@ -1,7 +1,7 @@
 use std::{
     fmt::Debug,
     io::ErrorKind,
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
     sync::{
         mpsc::{self, Receiver, Sender},
         Arc, LazyLock,
@@ -26,6 +26,12 @@ pub use nostr;
 pub use tungstenite;
 
 const PING_INTERVAL: u64 = 5; // ping interval in seconds
+
+/// Bound the TCP connect and the TLS + WebSocket handshake so a pool-supplied
+/// relay that accepts the connection and then stalls cannot wedge `connect()`
+/// forever. `set_nonblocking` supersedes these once the handshake completes.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -177,10 +183,28 @@ impl WsClientBuilder {
             } else {
                 80
             });
-        // `connect` walks every resolved address (v4 and v6) until one works,
-        // which matters on dual-stack networks where the first is unreachable.
-        let tcp = TcpStream::connect((host.as_str(), port))
-            .map_err(|e| Error::WebSocket(Box::new(tungstenite::Error::Io(e))))?;
+        // Try every resolved address (v4 and v6) with a bounded connect, so a
+        // dead first record neither hangs nor fails the whole attempt, then
+        // bound the handshake below.
+        let mut last_err = None;
+        let tcp = 'connect: {
+            let addrs = (host.as_str(), port)
+                .to_socket_addrs()
+                .map_err(|e| Error::WebSocket(Box::new(tungstenite::Error::Io(e))))?;
+            for a in addrs {
+                match TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
+                    Ok(s) => break 'connect s,
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            let e = last_err
+                .unwrap_or_else(|| std::io::Error::new(ErrorKind::NotFound, "no address resolved"));
+            return Err(Error::WebSocket(Box::new(tungstenite::Error::Io(e))));
+        };
+        // Bound the TLS + WebSocket handshake; set_nonblocking after it returns
+        // supersedes these for the read loop.
+        let _ = tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+        let _ = tcp.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
 
         // Force the `ring` provider by supplying our own rustls connector;
         // tungstenite's auto-negotiation would otherwise pick `aws-lc-rs`. For
@@ -453,9 +477,11 @@ pub fn listen(mut client: Socket, sender: Sender<RecvMsg>, receiver: Receiver<Se
                     WsMessage::Frame(_) => {}
                 }
             }
-            // A `WouldBlock` IO error just means no message is ready: keep
-            // looping, do not treat it as a disconnect.
-            Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
+            // `WouldBlock` means no message is ready and `Interrupted` (EINTR)
+            // is transient (std does not retry it for us): keep looping, do not
+            // treat either as a disconnect.
+            Err(tungstenite::Error::Io(e))
+                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
             // Any other read error (ConnectionClosed, AlreadyClosed, a hard Io
             // like ECONNRESET, or a Protocol/Tls/Capacity fault) is fatal: the
             // relay is gone, so signal Close and stop rather than spin forever.
