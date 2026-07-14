@@ -1,7 +1,11 @@
 use std::{
     fmt::Debug,
     io::ErrorKind,
-    sync::mpsc::{self, Receiver, Sender},
+    net::{TcpStream, ToSocketAddrs},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc, LazyLock,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -14,20 +18,28 @@ use nostr::{
     types::{Filter, Timestamp},
     util::JsonUtil,
 };
-use websocket::{
-    stream::sync::NetworkStream, sync::Client, url::ParseError, ClientBuilder, OwnedMessage,
-    WebSocketError,
+use tungstenite::{
+    client::IntoClientRequest, stream::MaybeTlsStream, Message as WsMessage, WebSocket,
 };
 
 pub use nostr;
-pub use websocket;
+pub use tungstenite;
 
 const PING_INTERVAL: u64 = 5; // ping interval in seconds
 
+/// Bound the TCP connect and the TLS + WebSocket handshake so a pool-supplied
+/// relay that accepts the connection and then stalls cannot wedge `connect()`
+/// forever. `set_nonblocking` supersedes these once the handshake completes.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
+
 #[derive(Debug)]
 pub enum Error {
-    WebSocket(WebSocketError),
-    Parse(ParseError),
+    // Boxed: `tungstenite::Error` embeds an `http::Response`, so keeping it
+    // inline would make every `Result<_, Error>` large (clippy::result_large_err).
+    WebSocket(Box<tungstenite::Error>),
     Listen,
     Send,
     Receive,
@@ -44,19 +56,49 @@ pub enum Error {
     RelayMessage,
 }
 
-impl From<WebSocketError> for Error {
-    fn from(value: WebSocketError) -> Self {
-        Self::WebSocket(value)
-    }
-}
-
-impl From<ParseError> for Error {
-    fn from(value: ParseError) -> Self {
-        Self::Parse(value)
+impl From<tungstenite::Error> for Error {
+    fn from(value: tungstenite::Error) -> Self {
+        Self::WebSocket(Box::new(value))
     }
 }
 
 type Message = String;
+
+/// A rustls client config using the `ring` crypto provider (rustls' default
+/// `aws-lc-rs` provider cannot be cross-compiled to Android) and the bundled
+/// Mozilla root set (webpki-roots), independent of any system trust store.
+/// Built once and shared: joinstr opens one relay connection per pool, so
+/// rebuilding the root store on every connect is wasteful.
+static TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    Arc::new(
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports the default protocol versions")
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    )
+});
+
+fn tls_config() -> Arc<rustls::ClientConfig> {
+    TLS_CONFIG.clone()
+}
+
+/// The underlying `TcpStream`, whether the connection is plaintext (`ws://`) or
+/// TLS (`wss://`).
+fn tcp_stream(ws: &Socket) -> Option<&TcpStream> {
+    // `MaybeTlsStream` is `#[non_exhaustive]`; only the rustls and plaintext
+    // backends are compiled in, but return `None` rather than panicking should
+    // a future variant appear.
+    match ws.get_ref() {
+        MaybeTlsStream::Plain(s) => Some(s),
+        MaybeTlsStream::Rustls(s) => Some(&s.sock),
+        _ => None,
+    }
+}
 
 #[derive(Debug)]
 pub enum SendMsg {
@@ -71,7 +113,7 @@ pub enum RecvMsg {
 }
 
 pub struct WsClient {
-    client: Option<Client<Box<dyn NetworkStream + Send>>>,
+    client: Option<Socket>,
     sender: Sender<SendMsg>,
     ws_receiver: Option<Receiver<SendMsg>>,
     receiver: Receiver<RecvMsg>,
@@ -130,10 +172,72 @@ impl WsClientBuilder {
         } else {
             return Err(Error::ArgMissing);
         };
-        let client = ClientBuilder::new(&url)?.connect(None)?;
-        client
+
+        let request = url.as_str().into_client_request()?;
+        let uri = request.uri();
+        let host = uri.host().ok_or(Error::ArgMissing)?.to_string();
+        let port = uri
+            .port_u16()
+            .unwrap_or(if uri.scheme_str() == Some("wss") {
+                443
+            } else {
+                80
+            });
+        // Try every resolved address (v4 and v6) with a bounded connect, so a
+        // dead first record neither hangs nor fails the whole attempt, then
+        // bound the handshake below.
+        let mut last_err = None;
+        let tcp = 'connect: {
+            let addrs = (host.as_str(), port)
+                .to_socket_addrs()
+                .map_err(|e| Error::WebSocket(Box::new(tungstenite::Error::Io(e))))?;
+            for a in addrs {
+                match TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
+                    Ok(s) => break 'connect s,
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            let e = last_err
+                .unwrap_or_else(|| std::io::Error::new(ErrorKind::NotFound, "no address resolved"));
+            return Err(Error::WebSocket(Box::new(tungstenite::Error::Io(e))));
+        };
+        // Bound the TLS + WebSocket handshake; set_nonblocking after it returns
+        // supersedes these for the read loop.
+        let _ = tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+        let _ = tcp.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
+
+        // Force the `ring` provider by supplying our own rustls connector;
+        // tungstenite's auto-negotiation would otherwise pick `aws-lc-rs`. For
+        // plaintext `ws://` relays the connector is simply unused.
+        let connector = tungstenite::Connector::Rustls(tls_config());
+        // Bound tungstenite's defaults (64 MiB message / 16 MiB frame /
+        // unbounded write buffer): a hostile relay could otherwise push a huge
+        // frame at a phone, and the write buffer can grow without limit when a
+        // relay stops reading our non-blocking socket.
+        let ws_config = tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(512 * 1024),
+            max_frame_size: Some(256 * 1024),
+            max_write_buffer_size: 1024 * 1024,
+            ..Default::default()
+        };
+        // The socket is still blocking here, so the handshake runs to
+        // completion (never `Interrupted`).
+        let (client, _resp) =
+            tungstenite::client_tls_with_config(request, tcp, Some(ws_config), Some(connector))
+                .map_err(|e| match e {
+                    tungstenite::HandshakeError::Failure(err) => Error::WebSocket(Box::new(err)),
+                    tungstenite::HandshakeError::Interrupted(_) => {
+                        Error::WebSocket(Box::new(tungstenite::Error::Io(std::io::Error::new(
+                            ErrorKind::WouldBlock,
+                            "handshake interrupted",
+                        ))))
+                    }
+                })?;
+        tcp_stream(&client)
+            .ok_or(Error::NonBlocking)?
             .set_nonblocking(true)
             .map_err(|_| Error::NonBlocking)?;
+
         let (sender, ws_receiver) = mpsc::channel();
         let (ws_sender, receiver) = mpsc::channel();
         let mut client = WsClient {
@@ -321,11 +425,7 @@ impl Drop for WsClient {
     }
 }
 
-pub fn listen(
-    mut client: Client<Box<dyn NetworkStream + Send>>,
-    sender: Sender<RecvMsg>,
-    receiver: Receiver<SendMsg>,
-) {
+pub fn listen(mut client: Socket, sender: Sender<RecvMsg>, receiver: Receiver<SendMsg>) {
     let mut backoff = Backoff::new_us(50);
 
     let mut last_ping = SystemTime::now();
@@ -337,8 +437,13 @@ pub fn listen(
             Ok(m) => match m {
                 SendMsg::Msg(m) => {
                     wait = false;
-                    if let Err(e) = client.send_message(&websocket::Message::text(m)) {
-                        log::error!("listen(): fail to send message: {:?}", e);
+                    match client.send(WsMessage::text(m)) {
+                        Ok(()) => {}
+                        // On the non-blocking socket a full write buffers in
+                        // tungstenite and flushes on a later call, so this is
+                        // not a lost frame, just backpressure.
+                        Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
+                        Err(e) => log::error!("listen(): fail to send message: {:?}", e),
                     }
                 }
                 SendMsg::Stop => return,
@@ -347,52 +452,44 @@ pub fn listen(
             _ => return,
         }
 
-        match client.recv_message() {
+        match client.read() {
             Ok(m) => {
                 wait = false;
                 match m {
-                    OwnedMessage::Text(m) => {
+                    WsMessage::Text(m) => {
                         log::debug!("recv text: {:?}", m);
                         let _ = sender.send(RecvMsg::Msg(m));
                     }
-                    OwnedMessage::Binary(m) => {
+                    WsMessage::Binary(m) => {
                         log::error!("listen() unexpected binary message {:?}", m);
                     }
-                    OwnedMessage::Close(_) => {
+                    WsMessage::Close(_) => {
                         log::debug!("recv: Close ");
                         sender.send(RecvMsg::Close).expect("main thread panicked");
                     }
-                    OwnedMessage::Ping(nonce) => {
-                        _ = client.send_message(&OwnedMessage::Pong(nonce));
+                    WsMessage::Ping(_) => {
+                        // tungstenite auto-queues the Pong on read(); a manual
+                        // reply here would send a redundant second pong.
                     }
-                    OwnedMessage::Pong(_) => {
+                    WsMessage::Pong(_) => {
                         last_pong = SystemTime::now();
                     }
+                    WsMessage::Frame(_) => {}
                 }
             }
-            Err(e) => match e {
-                WebSocketError::ProtocolError(_e) => {
-                    // FIXME:: why do we receive a bunch of protocols errors at startup?
-                    // log::error!("ProtocolError: {:?}", e);
-                }
-                WebSocketError::DataFrameError(_e) => {
-                    // FIXME: why do we receive a bunch of "Expected unmasked data frame" at startup?
-                    // log::error!("DataFrameError: {:?}", e);
-                }
-                WebSocketError::NoDataAvailable => {}
-                WebSocketError::IoError(e) => {
-                    if e.kind() == ErrorKind::WouldBlock {
-                    } else {
-                        log::error!("{:?}", e);
-                    }
-                }
-                WebSocketError::Utf8Error(e) => {
-                    log::error!("{:?}", e);
-                }
-                WebSocketError::Other(e) => {
-                    log::error!("{:?}", e);
-                }
-            },
+            // `WouldBlock` means no message is ready and `Interrupted` (EINTR)
+            // is transient (std does not retry it for us): keep looping, do not
+            // treat either as a disconnect.
+            Err(tungstenite::Error::Io(e))
+                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            // Any other read error (ConnectionClosed, AlreadyClosed, a hard Io
+            // like ECONNRESET, or a Protocol/Tls/Capacity fault) is fatal: the
+            // relay is gone, so signal Close and stop rather than spin forever.
+            Err(e) => {
+                log::error!("listen(): read error: {:?}", e);
+                let _ = sender.send(RecvMsg::Close);
+                return;
+            }
         }
 
         if SystemTime::now()
@@ -402,7 +499,7 @@ pub fn listen(
         {
             last_ping = SystemTime::now();
             ping_nonce = ping_nonce.wrapping_add(1);
-            _ = client.send_message(&OwnedMessage::Ping(vec![ping_nonce]));
+            _ = client.send(WsMessage::Ping(vec![ping_nonce]));
         }
 
         if SystemTime::now()

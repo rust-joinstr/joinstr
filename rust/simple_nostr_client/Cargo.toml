@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 log = { workspace = true }
 nostr = { workspace = true, features = ["nip04"] }
-websocket = { workspace = true, features = ["sync", "sync-ssl"] }
+tungstenite = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
 backoff = { workspace = true }
 
 
