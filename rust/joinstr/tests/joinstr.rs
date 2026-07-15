@@ -125,6 +125,7 @@ fn simple_coinjoin() {
         relays.clone(),
         (&url, port),
         Network::Regtest,
+        None,
         "initiator",
     )
     .unwrap()
@@ -209,6 +210,7 @@ fn simple_coinjoin() {
         coins[0].1.clone(),
         address_a,
         Network::Regtest,
+        None,
         "peer_a",
     )
     .unwrap();
@@ -219,6 +221,7 @@ fn simple_coinjoin() {
         coins[1].1.clone(),
         address_b,
         Network::Regtest,
+        None,
         "peer_b",
     )
     .unwrap();

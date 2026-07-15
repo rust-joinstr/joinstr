@@ -45,12 +45,20 @@ fn peer_config(mnemonic: &str, url: &str, port: u16, relay: &str, input: Coin) -
         output,
         relay: relay.to_string(),
         network: Network::Regtest,
+        proxy: None,
     }
 }
 
 fn first_coin(mnemonic: &str, url: &str, port: u16) -> Coin {
-    let coins =
-        interface::list_coins(mnemonic, url.to_string(), port, (0, 5), Network::Regtest).unwrap();
+    let coins = interface::list_coins(
+        mnemonic,
+        url.to_string(),
+        port,
+        (0, 5),
+        Network::Regtest,
+        None,
+    )
+    .unwrap();
     coins.into_iter().next().expect("funded coin present")
 }
 
@@ -109,7 +117,7 @@ fn interface_coinjoin_regtest() {
         thread::spawn(move || {
             let coin = first_coin(mnemonic, &url, port);
             let peer = peer_config(mnemonic, &url, port, &relay, coin);
-            let pools = interface::list_pools(60, 30_000_000, relay).unwrap();
+            let pools = interface::list_pools(60, 30_000_000, relay, None).unwrap();
             let mut pool = pools.into_iter().next().expect("pool advertised in window");
             // `Pool::network` is skip_serializing and decodes as mainnet; the
             // peer reapplies the network it is on (as the FFI wrapper does).
