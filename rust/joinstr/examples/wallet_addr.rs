@@ -38,6 +38,7 @@ fn main() {
             port.parse().expect("bad port"),
             (0, count),
             network,
+            None,
         )
         .expect("list_coins failed");
         println!("--- coins seen via {electrum} ---");

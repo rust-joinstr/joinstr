@@ -56,8 +56,8 @@ fn main() {
 
     // discover two funded inputs in the protocol's accepted range
     let (min, max) = (denom_sats + 500, denom_sats + 5000);
-    let coins =
-        list_coins(&mnemonic, host.to_string(), port, (0, 10), network).expect("list_coins failed");
+    let coins = list_coins(&mnemonic, host.to_string(), port, (0, 10), network, None)
+        .expect("list_coins failed");
     let mut usable: Vec<_> = coins
         .into_iter()
         .filter(|c| (min..=max).contains(&c.txout.value.to_sat()))
@@ -89,6 +89,7 @@ fn main() {
         relay.clone(),
         (host, port),
         network,
+        None,
         "initiator",
     )
     .expect("initiator")
@@ -125,10 +126,26 @@ fn main() {
     println!("pool discovered: {}", pool.id);
 
     // two peers join, register outputs, sign and submit inputs
-    let mut peer_a =
-        Joinstr::new_peer(relay.clone(), &pool, coin_a, addr_a, network, "peer_a").expect("peer_a");
-    let mut peer_b =
-        Joinstr::new_peer(relay.clone(), &pool, coin_b, addr_b, network, "peer_b").expect("peer_b");
+    let mut peer_a = Joinstr::new_peer(
+        relay.clone(),
+        &pool,
+        coin_a,
+        addr_a,
+        network,
+        None,
+        "peer_a",
+    )
+    .expect("peer_a");
+    let mut peer_b = Joinstr::new_peer(
+        relay.clone(),
+        &pool,
+        coin_b,
+        addr_b,
+        network,
+        None,
+        "peer_b",
+    )
+    .expect("peer_b");
     let s_a = signer.clone();
     let p_a = pool.clone();
     let h_a = thread::spawn(move || {

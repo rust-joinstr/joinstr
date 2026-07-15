@@ -63,7 +63,7 @@ fn main() {
 
     // 1. Discover the pool announced by the Python initiator (kind 2022).
     println!("listing pools (looking back 1h)...");
-    let pools = list_pools(3600, 10_000_000, relay.clone()).expect("list_pools failed");
+    let pools = list_pools(3600, 10_000_000, relay.clone(), None).expect("list_pools failed");
     println!("found {} pool(s)", pools.len());
     let pool = pools
         .into_iter()
@@ -83,6 +83,7 @@ fn main() {
         electrum_port,
         (0, 50),
         network,
+        None,
     )
     .expect("list_coins failed");
     let input = coins
@@ -113,6 +114,7 @@ fn main() {
         output: output.as_unchecked().clone(),
         relay,
         network,
+        proxy: None,
     };
 
     // 4. Run the coinjoin to completion. Every participant aggregates the signed

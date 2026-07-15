@@ -104,10 +104,10 @@ pub fn connect(
     let mut head = [0u8; 4];
     read_exact(&mut stream, &mut head)?;
     if head[1] != 0x00 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("SOCKS5 connect failed: reply code {:#04x}", head[1]),
-        ));
+        return Err(io::Error::other(format!(
+            "SOCKS5 connect failed: reply code {:#04x}",
+            head[1]
+        )));
     }
     let bound_len = match head[3] {
         0x01 => 4,
