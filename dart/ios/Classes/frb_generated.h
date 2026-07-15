@@ -45,6 +45,7 @@ typedef struct wire_cst_ffi_peer_config {
   struct wire_cst_list_prim_u_8_strict *output_address;
   struct wire_cst_list_prim_u_8_strict *relay;
   int32_t network;
+  struct wire_cst_list_prim_u_8_strict *proxy;
 } wire_cst_ffi_peer_config;
 
 typedef struct wire_cst_list_ffi_coin {
@@ -87,12 +88,14 @@ void frbgen_joinstr_flutter_wire__crate__api__joinstr__list_coins(int64_t port_,
                                                                   uint16_t electrum_port,
                                                                   uint32_t range_start,
                                                                   uint32_t range_end,
-                                                                  int32_t network);
+                                                                  int32_t network,
+                                                                  struct wire_cst_list_prim_u_8_strict *proxy);
 
 void frbgen_joinstr_flutter_wire__crate__api__joinstr__list_pools(int64_t port_,
                                                                   uint64_t back,
                                                                   uint64_t timeout,
-                                                                  struct wire_cst_list_prim_u_8_strict *relay);
+                                                                  struct wire_cst_list_prim_u_8_strict *relay,
+                                                                  struct wire_cst_list_prim_u_8_strict *proxy);
 
 struct wire_cst_ffi_peer_config *frbgen_joinstr_flutter_cst_new_box_autoadd_ffi_peer_config(void);
 

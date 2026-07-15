@@ -82,6 +82,10 @@ pub struct JoinstrInner<'a> {
     pub relay: Option<String>,
     pub fee: Option<Fee>,
     pub network: Network,
+    /// SOCKS5 proxy reused for every connection this instance opens after
+    /// construction (relay reconnects, the initiator's dummy join, electrum
+    /// reconnects), so no mid-coinjoin connection falls back to clearnet.
+    pub proxy: Option<String>,
     pub coinjoin: Option<CoinJoin<'a, crate::electrum::Client>>,
     pub electrum_client: Option<crate::electrum::Client>,
     input: Option<Coin>,
@@ -126,6 +130,7 @@ impl Default for JoinstrInner<'_> {
             relay: Default::default(),
             fee: Default::default(),
             network: Network::Bitcoin,
+            proxy: None,
             coinjoin: None,
             electrum_client: None,
             input: None,
@@ -150,13 +155,17 @@ impl Joinstr<'_> {
     /// Note: this instance do not have a bitcoin backend, it then cannot verify
     ///   that coins registered by other peers exists, and that an output is willing to
     ///   do address reuse.
-    fn new(keys: Keys, relay: String, name: &str) -> Result<Self, Error> {
-        let mut client = NostrClient::new(name).relay(relay.clone())?.keys(keys)?;
+    fn new(keys: Keys, relay: String, proxy: Option<String>, name: &str) -> Result<Self, Error> {
+        let mut client = NostrClient::new(name)
+            .relay(relay.clone())?
+            .proxy(proxy.clone())?
+            .keys(keys)?;
         client.connect_nostr()?;
         let relay = Some(relay);
         let inner = Arc::new(Mutex::new(JoinstrInner {
             client,
             relay,
+            proxy,
             ..Default::default()
         }));
         Ok(Joinstr { inner })
@@ -174,10 +183,15 @@ impl Joinstr<'_> {
         keys: Keys,
         relay: String,
         electrum_server: (&str, u16),
+        proxy: Option<String>,
         name: &str,
     ) -> Result<Self, Error> {
-        let electrum = crate::electrum::Client::new(electrum_server.0, electrum_server.1)?;
-        let j = Self::new(keys, relay, name)?;
+        let electrum = crate::electrum::Client::new_with_proxy(
+            electrum_server.0,
+            electrum_server.1,
+            proxy.clone(),
+        )?;
+        let j = Self::new(keys, relay, proxy, name)?;
         j.inner.lock().expect("poisoned").electrum_client = Some(electrum);
         Ok(j)
     }
@@ -197,12 +211,14 @@ impl Joinstr<'_> {
     /// Note: this instance do not have a bitcoin backend, it then cannot verify
     ///   that coins registered by other peers exists, and that an output is willing to
     ///   do address reuse.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_peer(
         relay: String,
         pool: &Pool,
         input: Coin,
         output: Address<NetworkUnchecked>,
         network: Network,
+        proxy: Option<String>,
         name: &str,
     ) -> Result<Self, Error> {
         let (denomination, fee, timeout, peers) = match &pool.payload {
@@ -231,7 +247,7 @@ impl Joinstr<'_> {
         };
         // NOTE: we create a randow key to process pool auth
         // FIXME: is the entropy of the key good enough?
-        let peer = Self::new(Keys::generate(), relay, name)?
+        let peer = Self::new(Keys::generate(), relay, proxy, name)?
             .network(network)
             .denomination(denomination)?
             .fee(fee)?
@@ -265,10 +281,15 @@ impl Joinstr<'_> {
         input: Coin,
         output: Address<NetworkUnchecked>,
         network: Network,
+        proxy: Option<String>,
         name: &str,
     ) -> Result<Self, Error> {
-        let electrum = crate::electrum::Client::new(electrum_server.0, electrum_server.1)?;
-        let peer = Self::new_peer(relay, pool, input, output, network, name)?;
+        let electrum = crate::electrum::Client::new_with_proxy(
+            electrum_server.0,
+            electrum_server.1,
+            proxy.clone(),
+        )?;
+        let peer = Self::new_peer(relay, pool, input, output, network, proxy, name)?;
         let mut inner = peer.inner.lock().expect("poisoned");
         inner.role = Role::Peer;
         inner.electrum_client = Some(electrum);
@@ -289,14 +310,16 @@ impl Joinstr<'_> {
     ///   be an empty &str.
     ///
     /// Note: the parameters of the pool should be passed with builder pattern
+    #[allow(clippy::too_many_arguments)]
     pub fn new_initiator(
         keys: Keys,
         relay: String,
         electrum_server: (&str, u16),
         network: Network,
+        proxy: Option<String>,
         name: &str,
     ) -> Result<Self, Error> {
-        let j = Self::new_with_electrum(keys, relay, electrum_server, name)?.network(network);
+        let j = Self::new_with_electrum(keys, relay, electrum_server, proxy, name)?.network(network);
         j.inner.lock().expect("poisoned").role = Role::Initiator;
         Ok(j)
     }
@@ -471,6 +494,7 @@ impl Joinstr<'_> {
                     let name = format!("prev_{fg}");
                     let mut new_client = NostrClient::new(&name)
                         .relay(inner.client.get_relay().unwrap())?
+                        .proxy(inner.proxy.clone())?
                         .keys(keys)?;
                     new_client.connect_nostr()?;
                     inner.client = new_client;
@@ -528,6 +552,7 @@ impl Joinstr<'_> {
         // output (no address set) is not counted among `peers`.
         let has_output = inner.output.is_some();
         let relay = inner.client.get_relay().ok_or(Error::RelaysMissing)?;
+        let proxy = inner.proxy.clone();
         drop(inner);
 
         let mut peers = HashSet::<PublicKey>::new();
@@ -542,7 +567,8 @@ impl Joinstr<'_> {
             // send a dummy join request
             let mut dummy_client = NostrClient::new("dummy")
                 .keys(Keys::generate())?
-                .relay(relay)?;
+                .relay(relay)?
+                .proxy(proxy.clone())?;
             dummy_client.connect_nostr()?;
             dummy_npub = Some(dummy_client.get_keys()?.public_key());
 
@@ -1016,12 +1042,18 @@ impl Joinstr<'_> {
         } = state;
         let secret_key = nostr::SecretKey::from_hex(pool_secret_key).map_err(|_| Error::PoolKey)?;
         let keys = Keys::new(secret_key);
-        let j = Joinstr::new(keys, relay, name)?.network(network);
+        // `State` predates proxy support and carries none, so a resumed round
+        // connects directly. The dart FFI never resumes (it drives
+        // `start_coinjoin_blocking` in one shot), so its Tor path is unaffected;
+        // wire a proxy into `State` if resume ever needs it.
+        let proxy: Option<String> = None;
+        let j = Joinstr::new(keys, relay, proxy.clone(), name)?.network(network);
         let mut inner = j.inner.lock().expect("poisoned");
         inner.role = role;
         inner.pool = Some(pool);
         if let Some((url, port)) = electrum {
-            inner.electrum_client = Some(crate::electrum::Client::new(&url, port)?)
+            inner.electrum_client =
+                Some(crate::electrum::Client::new_with_proxy(&url, port, proxy)?)
         }
         inner.input = input;
         if let Some(addr) = output {

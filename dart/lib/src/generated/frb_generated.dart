@@ -94,10 +94,14 @@ abstract class joinstrApi extends BaseApi {
       required int electrumPort,
       required int rangeStart,
       required int rangeEnd,
-      required BitcoinNetwork network});
+      required BitcoinNetwork network,
+      String? proxy});
 
   Future<List<FfiPool>> crateApiJoinstrListPools(
-      {required BigInt back, required BigInt timeout, required String relay});
+      {required BigInt back,
+      required BigInt timeout,
+      required String relay,
+      String? proxy});
 }
 
 class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
@@ -166,7 +170,8 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
       required int electrumPort,
       required int rangeStart,
       required int rangeEnd,
-      required BitcoinNetwork network}) {
+      required BitcoinNetwork network,
+      String? proxy}) {
     return handler.executeNormal(NormalTask(
       callFfi: (port_) {
         var arg0 = cst_encode_String(mnemonic);
@@ -175,8 +180,9 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
         var arg3 = cst_encode_u_32(rangeStart);
         var arg4 = cst_encode_u_32(rangeEnd);
         var arg5 = cst_encode_bitcoin_network(network);
+        var arg6 = cst_encode_opt_String(proxy);
         return wire.wire__crate__api__joinstr__list_coins(
-            port_, arg0, arg1, arg2, arg3, arg4, arg5);
+            port_, arg0, arg1, arg2, arg3, arg4, arg5, arg6);
       },
       codec: DcoCodec(
         decodeSuccessData: dco_decode_list_ffi_coin,
@@ -189,7 +195,8 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
         electrumPort,
         rangeStart,
         rangeEnd,
-        network
+        network,
+        proxy
       ],
       apiImpl: this,
     ));
@@ -203,34 +210,39 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
           "electrumPort",
           "rangeStart",
           "rangeEnd",
-          "network"
+          "network",
+          "proxy"
         ],
       );
 
   @override
   Future<List<FfiPool>> crateApiJoinstrListPools(
-      {required BigInt back, required BigInt timeout, required String relay}) {
+      {required BigInt back,
+      required BigInt timeout,
+      required String relay,
+      String? proxy}) {
     return handler.executeNormal(NormalTask(
       callFfi: (port_) {
         var arg0 = cst_encode_u_64(back);
         var arg1 = cst_encode_u_64(timeout);
         var arg2 = cst_encode_String(relay);
+        var arg3 = cst_encode_opt_String(proxy);
         return wire.wire__crate__api__joinstr__list_pools(
-            port_, arg0, arg1, arg2);
+            port_, arg0, arg1, arg2, arg3);
       },
       codec: DcoCodec(
         decodeSuccessData: dco_decode_list_ffi_pool,
         decodeErrorData: dco_decode_joinstr_error,
       ),
       constMeta: kCrateApiJoinstrListPoolsConstMeta,
-      argValues: [back, timeout, relay],
+      argValues: [back, timeout, relay, proxy],
       apiImpl: this,
     ));
   }
 
   TaskConstMeta get kCrateApiJoinstrListPoolsConstMeta => const TaskConstMeta(
         debugName: "list_pools",
-        argNames: ["back", "timeout", "relay"],
+        argNames: ["back", "timeout", "relay", "proxy"],
       );
 
   @protected
@@ -290,8 +302,8 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   FfiPeerConfig dco_decode_ffi_peer_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return FfiPeerConfig(
       mnemonic: dco_decode_String(arr[0]),
       electrumAddress: dco_decode_String(arr[1]),
@@ -300,6 +312,7 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
       outputAddress: dco_decode_String(arr[4]),
       relay: dco_decode_String(arr[5]),
       network: dco_decode_bitcoin_network(arr[6]),
+      proxy: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -478,6 +491,7 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
     var var_outputAddress = sse_decode_String(deserializer);
     var var_relay = sse_decode_String(deserializer);
     var var_network = sse_decode_bitcoin_network(deserializer);
+    var var_proxy = sse_decode_opt_String(deserializer);
     return FfiPeerConfig(
         mnemonic: var_mnemonic,
         electrumAddress: var_electrumAddress,
@@ -485,7 +499,8 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
         input: var_input,
         outputAddress: var_outputAddress,
         relay: var_relay,
-        network: var_network);
+        network: var_network,
+        proxy: var_proxy);
   }
 
   @protected
@@ -722,6 +737,7 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
     sse_encode_String(self.outputAddress, serializer);
     sse_encode_String(self.relay, serializer);
     sse_encode_bitcoin_network(self.network, serializer);
+    sse_encode_opt_String(self.proxy, serializer);
   }
 
   @protected

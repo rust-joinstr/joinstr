@@ -22,6 +22,7 @@ pub fn list_coins(
     range_start: u32,
     range_end: u32,
     network: BitcoinNetwork,
+    proxy: Option<String>,
 ) -> Result<Vec<FfiCoin>, JoinstrError> {
     // Wipe our owned copy of the seed on every path out, including the `?`
     // early returns below.
@@ -32,6 +33,7 @@ pub fn list_coins(
         electrum_port,
         (range_start, range_end),
         network.into(),
+        proxy,
     )?;
     Ok(coins.into_iter().map(FfiCoin::from).collect())
 }
@@ -39,10 +41,18 @@ pub fn list_coins(
 /// List coinjoin pools advertised on `relay` (`wss://`/`ws://`) within the last
 /// `back` seconds, waiting `timeout` microseconds for relay notifications.
 ///
+/// `proxy` is an optional SOCKS5 address (`host:port`, e.g. a local Tor port)
+/// the relay is reached through; `None` connects directly.
+///
 /// A relay carries pools from every client; one this version cannot decode is
 /// skipped, not surfaced as a placeholder and not allowed to fail the listing.
-pub fn list_pools(back: u64, timeout: u64, relay: String) -> Result<Vec<FfiPool>, JoinstrError> {
-    let pools = interface::list_pools(back, timeout, relay)?;
+pub fn list_pools(
+    back: u64,
+    timeout: u64,
+    relay: String,
+    proxy: Option<String>,
+) -> Result<Vec<FfiPool>, JoinstrError> {
+    let pools = interface::list_pools(back, timeout, relay, proxy)?;
     Ok(pools
         .iter()
         .filter_map(|pool| match FfiPool::from_pool(pool) {

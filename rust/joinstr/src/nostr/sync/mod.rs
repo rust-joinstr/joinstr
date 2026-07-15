@@ -51,6 +51,17 @@ impl NostrClient {
         }
     }
 
+    /// Route this client through a SOCKS5 proxy (`host:port`), e.g. a local Tor
+    /// port. `None` connects directly.
+    pub fn proxy(mut self, proxy: Option<String>) -> Result<Self, Error> {
+        if let Some(builder) = self.builder.as_mut() {
+            builder.set_proxy(proxy);
+            Ok(self)
+        } else {
+            Err(Error::AlreadyConnected)
+        }
+    }
+
     /// Set the nostr key pair of this client.
     ///
     /// # Errors

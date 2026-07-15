@@ -131,6 +131,18 @@ impl Client {
         }
     }
 
+    /// Route this client's connection through a SOCKS5 proxy (`host:port`),
+    /// e.g. a local Tor port. `None` connects directly. Must be set before
+    /// `try_connect`.
+    pub fn proxy(mut self, proxy: Option<String>) -> Self {
+        match &mut self {
+            Client::None => {}
+            Client::Tcp(c) => c.proxy = proxy,
+            Client::Ssl(c) => c.proxy = proxy,
+        }
+        self
+    }
+
     pub fn read_timeout(mut self, timeout: Option<Duration>) -> Self {
         match &mut self {
             Client::None => {}

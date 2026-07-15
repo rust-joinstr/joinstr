@@ -37,6 +37,7 @@ static VERIFYING_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new
 pub struct SslClient {
     url: String,
     port: u16,
+    pub(crate) proxy: Option<String>,
     pub(crate) stream: Option<SharedStream>,
     pub(crate) read_timeout: Option<Duration>,
     pub(crate) write_timeout: Option<Duration>,
@@ -48,6 +49,7 @@ impl Clone for SslClient {
         Self {
             url: self.url.clone(),
             port: self.port,
+            proxy: self.proxy.clone(),
             stream: self.stream.clone(),
             read_timeout: self.read_timeout,
             write_timeout: self.write_timeout,
@@ -67,6 +69,7 @@ impl Default for SslClient {
         Self {
             url: Default::default(),
             port: 50002,
+            proxy: None,
             stream: None,
             read_timeout: None,
             write_timeout: None,
@@ -81,6 +84,15 @@ impl SslClient {
             self.url = url.into();
         } else {
             log::error!("Cannot change url of a connected SslClient!")
+        }
+        self
+    }
+
+    pub fn proxy(mut self, proxy: Option<String>) -> Self {
+        if !self.is_connected() {
+            self.proxy = proxy;
+        } else {
+            log::error!("Cannot change proxy of a connected SslClient!")
         }
         self
     }
@@ -128,10 +140,23 @@ impl SslClient {
             .map_err(|_| Error::InvalidDnsName)?;
         let conn = rustls::ClientConnection::new(config, server_name).map_err(Error::Tls)?;
 
-        // Try every resolved address (v4 and v6) with a bounded connect, so a
-        // dead first record neither hangs nor fails the whole attempt.
+        // Through a proxy: hand the electrum hostname to the proxy (remote DNS,
+        // no local lookup) on its own isolated circuit. Directly: try every
+        // resolved address with a bounded connect so a dead first record
+        // neither hangs nor fails the whole attempt. TLS runs over the returned
+        // socket either way, so the certificate is still verified end to end.
         let mut last_err = None;
         let sock = 'connect: {
+            if let Some(proxy) = self.proxy.as_deref() {
+                break 'connect socks5::connect(
+                    proxy,
+                    &self.url,
+                    self.port,
+                    &socks5::isolation_token(),
+                    CONNECT_TIMEOUT,
+                )
+                .map_err(Error::TcpStream)?;
+            }
             for a in addr.to_socket_addrs().map_err(Error::TcpStream)? {
                 match net::TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
                     Ok(s) => break 'connect s,

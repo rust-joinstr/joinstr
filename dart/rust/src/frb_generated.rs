@@ -101,6 +101,7 @@ fn wire__crate__api__joinstr__list_coins_impl(
     range_start: impl CstDecode<u32>,
     range_end: impl CstDecode<u32>,
     network: impl CstDecode<crate::api::types::BitcoinNetwork>,
+    proxy: impl CstDecode<Option<String>>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -115,6 +116,7 @@ fn wire__crate__api__joinstr__list_coins_impl(
             let api_range_start = range_start.cst_decode();
             let api_range_end = range_end.cst_decode();
             let api_network = network.cst_decode();
+            let api_proxy = proxy.cst_decode();
             move |context| {
                 transform_result_dco::<_, _, crate::api::error::JoinstrError>((move || {
                     let output_ok = crate::api::joinstr::list_coins(
@@ -124,6 +126,7 @@ fn wire__crate__api__joinstr__list_coins_impl(
                         api_range_start,
                         api_range_end,
                         api_network,
+                        api_proxy,
                     )?;
                     Ok(output_ok)
                 })())
@@ -136,6 +139,7 @@ fn wire__crate__api__joinstr__list_pools_impl(
     back: impl CstDecode<u64>,
     timeout: impl CstDecode<u64>,
     relay: impl CstDecode<String>,
+    proxy: impl CstDecode<Option<String>>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -147,10 +151,15 @@ fn wire__crate__api__joinstr__list_pools_impl(
             let api_back = back.cst_decode();
             let api_timeout = timeout.cst_decode();
             let api_relay = relay.cst_decode();
+            let api_proxy = proxy.cst_decode();
             move |context| {
                 transform_result_dco::<_, _, crate::api::error::JoinstrError>((move || {
-                    let output_ok =
-                        crate::api::joinstr::list_pools(api_back, api_timeout, api_relay)?;
+                    let output_ok = crate::api::joinstr::list_pools(
+                        api_back,
+                        api_timeout,
+                        api_relay,
+                        api_proxy,
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -269,6 +278,7 @@ impl SseDecode for crate::api::types::FfiPeerConfig {
         let mut var_outputAddress = <String>::sse_decode(deserializer);
         let mut var_relay = <String>::sse_decode(deserializer);
         let mut var_network = <crate::api::types::BitcoinNetwork>::sse_decode(deserializer);
+        let mut var_proxy = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::FfiPeerConfig {
             mnemonic: var_mnemonic,
             electrum_address: var_electrumAddress,
@@ -277,6 +287,7 @@ impl SseDecode for crate::api::types::FfiPeerConfig {
             output_address: var_outputAddress,
             relay: var_relay,
             network: var_network,
+            proxy: var_proxy,
         };
     }
 }
@@ -517,6 +528,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::FfiPeerConfig {
             self.output_address.into_into_dart().into_dart(),
             self.relay.into_into_dart().into_dart(),
             self.network.into_into_dart().into_dart(),
+            self.proxy.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -652,6 +664,7 @@ impl SseEncode for crate::api::types::FfiPeerConfig {
         <String>::sse_encode(self.output_address, serializer);
         <String>::sse_encode(self.relay, serializer);
         <crate::api::types::BitcoinNetwork>::sse_encode(self.network, serializer);
+        <Option<String>>::sse_encode(self.proxy, serializer);
     }
 }
 
@@ -852,6 +865,7 @@ mod io {
                 output_address: self.output_address.cst_decode(),
                 relay: self.relay.cst_decode(),
                 network: self.network.cst_decode(),
+                proxy: self.proxy.cst_decode(),
             }
         }
     }
@@ -948,6 +962,7 @@ mod io {
                 output_address: core::ptr::null_mut(),
                 relay: core::ptr::null_mut(),
                 network: Default::default(),
+                proxy: core::ptr::null_mut(),
             }
         }
     }
@@ -1032,6 +1047,7 @@ mod io {
         range_start: u32,
         range_end: u32,
         network: i32,
+        proxy: *mut wire_cst_list_prim_u_8_strict,
     ) {
         wire__crate__api__joinstr__list_coins_impl(
             port_,
@@ -1041,6 +1057,7 @@ mod io {
             range_start,
             range_end,
             network,
+            proxy,
         )
     }
 
@@ -1050,8 +1067,9 @@ mod io {
         back: u64,
         timeout: u64,
         relay: *mut wire_cst_list_prim_u_8_strict,
+        proxy: *mut wire_cst_list_prim_u_8_strict,
     ) {
-        wire__crate__api__joinstr__list_pools_impl(port_, back, timeout, relay)
+        wire__crate__api__joinstr__list_pools_impl(port_, back, timeout, relay, proxy)
     }
 
     #[unsafe(no_mangle)]
@@ -1135,6 +1153,7 @@ mod io {
         output_address: *mut wire_cst_list_prim_u_8_strict,
         relay: *mut wire_cst_list_prim_u_8_strict,
         network: i32,
+        proxy: *mut wire_cst_list_prim_u_8_strict,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]

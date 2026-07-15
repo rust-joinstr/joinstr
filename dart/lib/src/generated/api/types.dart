@@ -81,6 +81,12 @@ class FfiPeerConfig {
   final String relay;
   final BitcoinNetwork network;
 
+  /// SOCKS5 proxy (`host:port`) for every relay and electrum connection this
+  /// peer opens, e.g. a local Tor port such as `127.0.0.1:9050`. `None`
+  /// connects directly. Each connection uses a fresh isolation credential so
+  /// Tor assigns it its own circuit.
+  final String? proxy;
+
   const FfiPeerConfig({
     required this.mnemonic,
     required this.electrumAddress,
@@ -89,6 +95,7 @@ class FfiPeerConfig {
     required this.outputAddress,
     required this.relay,
     required this.network,
+    this.proxy,
   });
 
   @override
@@ -99,7 +106,8 @@ class FfiPeerConfig {
       input.hashCode ^
       outputAddress.hashCode ^
       relay.hashCode ^
-      network.hashCode;
+      network.hashCode ^
+      proxy.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -112,7 +120,8 @@ class FfiPeerConfig {
           input == other.input &&
           outputAddress == other.outputAddress &&
           relay == other.relay &&
-          network == other.network;
+          network == other.network &&
+          proxy == other.proxy;
 }
 
 /// A coinjoin pool advertised on a nostr relay.

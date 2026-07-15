@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 log = { workspace = true }
+socks5 = { workspace = true }
 nostr = { workspace = true, features = ["nip04"] }
 tungstenite = { workspace = true }
 rustls = { workspace = true }

@@ -267,6 +267,7 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
     wireObj.output_address = cst_encode_String(apiObj.outputAddress);
     wireObj.relay = cst_encode_String(apiObj.relay);
     wireObj.network = cst_encode_bitcoin_network(apiObj.network);
+    wireObj.proxy = cst_encode_opt_String(apiObj.proxy);
   }
 
   @protected
@@ -485,6 +486,7 @@ class joinstrWire implements BaseWire {
     int range_start,
     int range_end,
     int network,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> proxy,
   ) {
     return _wire__crate__api__joinstr__list_coins(
       port_,
@@ -494,6 +496,7 @@ class joinstrWire implements BaseWire {
       range_start,
       range_end,
       network,
+      proxy,
     );
   }
 
@@ -506,7 +509,8 @@ class joinstrWire implements BaseWire {
                   ffi.Uint16,
                   ffi.Uint32,
                   ffi.Uint32,
-                  ffi.Int32)>>(
+                  ffi.Int32,
+                  ffi.Pointer<wire_cst_list_prim_u_8_strict>)>>(
       'frbgen_joinstr_flutter_wire__crate__api__joinstr__list_coins');
   late final _wire__crate__api__joinstr__list_coins =
       _wire__crate__api__joinstr__list_coinsPtr.asFunction<
@@ -517,31 +521,42 @@ class joinstrWire implements BaseWire {
               int,
               int,
               int,
-              int)>();
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>)>();
 
   void wire__crate__api__joinstr__list_pools(
     int port_,
     int back,
     int timeout,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> relay,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> proxy,
   ) {
     return _wire__crate__api__joinstr__list_pools(
       port_,
       back,
       timeout,
       relay,
+      proxy,
     );
   }
 
   late final _wire__crate__api__joinstr__list_poolsPtr = _lookup<
           ffi.NativeFunction<
-              ffi.Void Function(ffi.Int64, ffi.Uint64, ffi.Uint64,
+              ffi.Void Function(
+                  ffi.Int64,
+                  ffi.Uint64,
+                  ffi.Uint64,
+                  ffi.Pointer<wire_cst_list_prim_u_8_strict>,
                   ffi.Pointer<wire_cst_list_prim_u_8_strict>)>>(
       'frbgen_joinstr_flutter_wire__crate__api__joinstr__list_pools');
   late final _wire__crate__api__joinstr__list_pools =
       _wire__crate__api__joinstr__list_poolsPtr.asFunction<
           void Function(
-              int, int, int, ffi.Pointer<wire_cst_list_prim_u_8_strict>)>();
+              int,
+              int,
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>)>();
 
   ffi.Pointer<wire_cst_ffi_peer_config> cst_new_box_autoadd_ffi_peer_config() {
     return _cst_new_box_autoadd_ffi_peer_config();
@@ -704,6 +719,8 @@ final class wire_cst_ffi_peer_config extends ffi.Struct {
 
   @ffi.Int32()
   external int network;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> proxy;
 }
 
 final class wire_cst_list_ffi_coin extends ffi.Struct {

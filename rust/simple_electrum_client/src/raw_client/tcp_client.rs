@@ -8,10 +8,15 @@ use std::{
 
 type TcpStream = Arc<Mutex<net::TcpStream>>;
 
+/// Bounds the proxy handshake so a wedged Tor cannot hang the connect. Only
+/// used on the proxied path; the direct path keeps its prior blocking connect.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug)]
 pub struct TcpClient {
     url: String,
     port: u16,
+    pub(crate) proxy: Option<String>,
     pub(crate) stream: Option<TcpStream>,
     pub(crate) read_timeout: Option<Duration>,
     pub(crate) write_timeout: Option<Duration>,
@@ -22,6 +27,7 @@ impl Clone for TcpClient {
         Self {
             url: self.url.clone(),
             port: self.port,
+            proxy: self.proxy.clone(),
             stream: self.stream.clone(),
             read_timeout: self.read_timeout,
             write_timeout: self.write_timeout,
@@ -35,6 +41,7 @@ impl Default for TcpClient {
         Self {
             url: Default::default(),
             port: 50002,
+            proxy: None,
             stream: None,
             read_timeout: None,
             write_timeout: None,
@@ -67,13 +74,35 @@ impl TcpClient {
         self
     }
 
+    pub fn proxy(mut self, proxy: Option<String>) -> Self {
+        if !self.is_connected() {
+            self.proxy = proxy;
+        } else {
+            log::error!("Cannot change proxy of a connected TcpClient!")
+        }
+        self
+    }
+
     pub fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
 
     pub fn try_connect(&mut self) -> Result<(), Error> {
-        let url = format!("{}:{}", self.url, self.port);
-        let stream = net::TcpStream::connect(url).map_err(Error::TcpStream)?;
+        let stream = if let Some(proxy) = self.proxy.as_deref() {
+            // Remote DNS through the proxy on its own circuit; the electrum
+            // hostname is never resolved locally.
+            socks5::connect(
+                proxy,
+                &self.url,
+                self.port,
+                &socks5::isolation_token(),
+                CONNECT_TIMEOUT,
+            )
+            .map_err(Error::TcpStream)?
+        } else {
+            net::TcpStream::connect(format!("{}:{}", self.url, self.port))
+                .map_err(Error::TcpStream)?
+        };
         stream
             .set_read_timeout(self.read_timeout)
             .map_err(Error::TcpStream)?;
