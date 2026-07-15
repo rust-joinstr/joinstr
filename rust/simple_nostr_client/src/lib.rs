@@ -137,6 +137,9 @@ impl Debug for WsClient {
 pub struct WsClientBuilder {
     relay: Option<String>,
     keys: Option<Keys>,
+    /// SOCKS5 proxy (`host:port`) to reach the relay through, e.g. a local Tor
+    /// port. `None` connects directly.
+    proxy: Option<String>,
 }
 
 impl WsClientBuilder {
@@ -151,6 +154,15 @@ impl WsClientBuilder {
 
     pub fn get_relay(&self) -> Option<String> {
         self.relay.clone()
+    }
+
+    pub fn proxy<T: Into<String>>(mut self, proxy: Option<T>) -> Self {
+        self.proxy = proxy.map(Into::into);
+        self
+    }
+
+    pub fn set_proxy<T: Into<String>>(&mut self, proxy: Option<T>) {
+        self.proxy = proxy.map(Into::into);
     }
 
     pub fn keys(mut self, keys: Keys) -> Self {
@@ -172,6 +184,7 @@ impl WsClientBuilder {
         } else {
             return Err(Error::ArgMissing);
         };
+        let proxy = self.proxy;
 
         let request = url.as_str().into_client_request()?;
         let uri = request.uri();
@@ -183,11 +196,23 @@ impl WsClientBuilder {
             } else {
                 80
             });
-        // Try every resolved address (v4 and v6) with a bounded connect, so a
-        // dead first record neither hangs nor fails the whole attempt, then
-        // bound the handshake below.
+        // Through a proxy: hand the relay hostname to the proxy (remote DNS, no
+        // local lookup) on its own isolated circuit. Directly: try every
+        // resolved address with a bounded connect so a dead first record
+        // neither hangs nor fails the whole attempt. Either way the handshake
+        // below is bounded.
         let mut last_err = None;
         let tcp = 'connect: {
+            if let Some(proxy) = proxy.as_deref() {
+                break 'connect socks5::connect(
+                    proxy,
+                    &host,
+                    port,
+                    &socks5::isolation_token(),
+                    CONNECT_TIMEOUT,
+                )
+                .map_err(|e| Error::WebSocket(Box::new(tungstenite::Error::Io(e))))?;
+            }
             let addrs = (host.as_str(), port)
                 .to_socket_addrs()
                 .map_err(|e| Error::WebSocket(Box::new(tungstenite::Error::Io(e))))?;

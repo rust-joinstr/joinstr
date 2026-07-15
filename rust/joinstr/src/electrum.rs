@@ -156,11 +156,14 @@ pub struct Client {
     last_id: usize,
     url: String,
     port: u16,
+    proxy: Option<String>,
 }
 
 impl Clone for Client {
     fn clone(&self) -> Self {
-        Client::new(&self.url, self.port).unwrap()
+        // Preserve the proxy: the signer clones its electrum client, and a
+        // clone that reconnected directly would leak the real IP mid-coinjoin.
+        Client::new_with_proxy(&self.url, self.port, self.proxy.clone()).unwrap()
     }
 }
 
@@ -171,9 +174,21 @@ impl Client {
     /// * `address` - url/ip of the electrum server as String
     /// * `port` - port of the electrum server
     pub fn new(address: &str, port: u16) -> Result<Self, Error> {
+        Self::new_with_proxy(address, port, None)
+    }
+
+    /// Create a new electrum client, optionally reached through a SOCKS5 proxy
+    /// (`host:port`), e.g. a local Tor port. The `ssl://` scheme in `address`
+    /// is honored the same way regardless of the proxy.
+    ///
+    /// # Arguments
+    /// * `address` - url/ip of the electrum server as String
+    /// * `port` - port of the electrum server
+    /// * `proxy` - optional SOCKS5 proxy address
+    pub fn new_with_proxy(address: &str, port: u16, proxy: Option<String>) -> Result<Self, Error> {
         let ssl = address.starts_with("ssl://");
         let address = address.to_string().replace("ssl://", "");
-        let mut inner = RawClient::new_ssl_maybe(&address, port, ssl);
+        let mut inner = RawClient::new_ssl_maybe(&address, port, ssl).proxy(proxy.clone());
         inner.try_connect()?;
         Ok(Client {
             inner,
@@ -181,6 +196,7 @@ impl Client {
             last_id: 0,
             url: address,
             port,
+            proxy,
         })
     }
 
@@ -201,6 +217,7 @@ impl Client {
             last_id: 0,
             url: address,
             port,
+            proxy: None,
         })
     }
 

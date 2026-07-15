@@ -122,6 +122,11 @@ pub struct FfiPeerConfig {
     /// Nostr relay url (`wss://` or `ws://`).
     pub relay: String,
     pub network: BitcoinNetwork,
+    /// SOCKS5 proxy (`host:port`) for every relay and electrum connection this
+    /// peer opens, e.g. a local Tor port such as `127.0.0.1:9050`. `None`
+    /// connects directly. Each connection uses a fresh isolation credential so
+    /// Tor assigns it its own circuit.
+    pub proxy: Option<String>,
 }
 
 impl TryFrom<FfiPeerConfig> for PeerConfig {
@@ -144,6 +149,7 @@ impl TryFrom<FfiPeerConfig> for PeerConfig {
             output,
             relay: value.relay,
             network: value.network.into(),
+            proxy: value.proxy,
         })
     }
 }
@@ -391,6 +397,7 @@ mod tests {
             output_address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080".into(),
             relay: "wss://nos.lol".into(),
             network: BitcoinNetwork::Regtest,
+            proxy: None,
         }
     }
 

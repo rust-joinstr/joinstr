@@ -120,6 +120,9 @@ pub struct PeerConfig {
     pub output: Address<NetworkUnchecked>,
     pub relay: String,
     pub network: Network,
+    /// SOCKS5 proxy (`host:port`) for every relay and electrum connection this
+    /// peer opens, e.g. a local Tor port. `None` connects directly.
+    pub proxy: Option<String>,
 }
 
 /// Reject inverted and oversized scan ranges before they reach electrum.
@@ -150,10 +153,11 @@ pub fn list_coins(
     electrum_port: u16,
     range: (u32, u32),
     network: Network,
+    proxy: Option<String>,
 ) -> Result<Vec<Coin>, Error> {
     check_scan_range(range)?;
     let mut signer = WpkhHotSigner::new_from_mnemonics(network, mnemonics)?;
-    let client = Client::new(&electrum_address, electrum_port)?;
+    let client = Client::new_with_proxy(&electrum_address, electrum_port, proxy)?;
     signer.set_client(client);
 
     for i in range.0..range.1 {
@@ -185,11 +189,13 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
         })?;
 
     let (url, port) = (peer.electrum_address, peer.electrum_port);
+    let proxy = peer.proxy;
     let mut initiator = Joinstr::new_initiator(
         Keys::generate(),
         peer.relay.clone(),
         (&url, port),
         config.network,
+        proxy.clone(),
         "initiator",
     )?
     .denomination(config.denomination)?
@@ -201,7 +207,7 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
     // rather than leaving it in freed heap.
     let mnemonics = Zeroizing::new(peer.mnemonics.to_string());
     let mut signer = WpkhHotSigner::new_from_mnemonics(config.network, &mnemonics)?;
-    let client = Client::new(&url, port)?;
+    let client = Client::new_with_proxy(&url, port, proxy)?;
     signer.set_client(client);
 
     let addr = peer.output;
@@ -228,10 +234,16 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
 /// * `relay` - the relay url, must start w/ `wss://` or `ws://`
 ///
 /// # Returns a [`Vec`]  of [`String`] containing a json serialization of a [`Pool`]
-pub fn list_pools(back: u64, timeout: u64, relay: String) -> Result<Vec<Pool>, Error> {
+pub fn list_pools(
+    back: u64,
+    timeout: u64,
+    relay: String,
+    proxy: Option<String>,
+) -> Result<Vec<Pool>, Error> {
     let mut pools = Vec::new();
     let mut pool_listener = NostrClient::new("pool_listener")
         .relay(relay)?
+        .proxy(proxy)?
         .keys(Keys::generate())?;
     pool_listener.connect_nostr()?;
     // subscribe to kind:2022 pool events published within the last `back` seconds
@@ -282,6 +294,7 @@ pub fn list_pools(back: u64, timeout: u64, relay: String) -> Result<Vec<Pool>, E
 ///
 pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, Error> {
     let (url, port) = (peer.electrum_address, peer.electrum_port);
+    let proxy = peer.proxy;
     let addr = peer.output;
     let coin = peer.input;
     let mut joinstr_peer = Joinstr::new_peer_with_electrum(
@@ -291,13 +304,14 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
         coin,
         addr,
         peer.network,
+        proxy.clone(),
         "peer",
     )?;
 
     // As in `initiate_coinjoin`: wipe the rendered copy of the seed.
     let mnemonics = Zeroizing::new(peer.mnemonics.to_string());
     let mut signer = WpkhHotSigner::new_from_mnemonics(peer.network, &mnemonics)?;
-    let client = Client::new(&url, port)?;
+    let client = Client::new_with_proxy(&url, port, proxy)?;
     signer.set_client(client);
 
     // Pass the pool so the peer JOINS it. `start_coinjoin_blocking(None, ..)`

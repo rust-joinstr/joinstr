@@ -19,26 +19,32 @@ Future<List<FfiCoin>> listCoins(
         required int electrumPort,
         required int rangeStart,
         required int rangeEnd,
-        required BitcoinNetwork network}) =>
+        required BitcoinNetwork network,
+        String? proxy}) =>
     joinstr.instance.api.crateApiJoinstrListCoins(
         mnemonic: mnemonic,
         electrumAddress: electrumAddress,
         electrumPort: electrumPort,
         rangeStart: rangeStart,
         rangeEnd: rangeEnd,
-        network: network);
+        network: network,
+        proxy: proxy);
 
 /// List coinjoin pools advertised on `relay` (`wss://`/`ws://`) within the last
 /// `back` seconds, waiting `timeout` microseconds for relay notifications.
+///
+/// `proxy` is an optional SOCKS5 address (`host:port`, e.g. a local Tor port)
+/// the relay is reached through; `None` connects directly.
 ///
 /// A relay carries pools from every client; one this version cannot decode is
 /// skipped, not surfaced as a placeholder and not allowed to fail the listing.
 Future<List<FfiPool>> listPools(
         {required BigInt back,
         required BigInt timeout,
-        required String relay}) =>
-    joinstr.instance.api
-        .crateApiJoinstrListPools(back: back, timeout: timeout, relay: relay);
+        required String relay,
+        String? proxy}) =>
+    joinstr.instance.api.crateApiJoinstrListPools(
+        back: back, timeout: timeout, relay: relay, proxy: proxy);
 
 /// Initiate a new coinjoin pool and participate in it.
 ///

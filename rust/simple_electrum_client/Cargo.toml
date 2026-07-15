@@ -15,6 +15,7 @@ path = "src/bin/cli.rs"
 miniscript = { workspace = true, features = ["serde", "base64"] }
 bitcoin_slices = { workspace = true }
 log = { workspace = true }
+socks5 = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
