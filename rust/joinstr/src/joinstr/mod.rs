@@ -319,7 +319,8 @@ impl Joinstr<'_> {
         proxy: Option<String>,
         name: &str,
     ) -> Result<Self, Error> {
-        let j = Self::new_with_electrum(keys, relay, electrum_server, proxy, name)?.network(network);
+        let j =
+            Self::new_with_electrum(keys, relay, electrum_server, proxy, name)?.network(network);
         j.inner.lock().expect("poisoned").role = Role::Initiator;
         Ok(j)
     }

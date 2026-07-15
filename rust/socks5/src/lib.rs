@@ -223,13 +223,7 @@ mod tests {
                 .unwrap();
         });
 
-        let stream = connect(
-            &proxy,
-            "relay.example",
-            443,
-            "tok0",
-            Duration::from_secs(5),
-        );
+        let stream = connect(&proxy, "relay.example", 443, "tok0", Duration::from_secs(5));
         assert!(stream.is_ok(), "connect failed: {:?}", stream.err());
         server.join().unwrap();
     }
@@ -266,8 +260,8 @@ mod tests {
                 .unwrap();
         });
 
-        let err = connect(&proxy, "relay.example", 443, "tok0", Duration::from_secs(5))
-            .unwrap_err();
+        let err =
+            connect(&proxy, "relay.example", 443, "tok0", Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("connect failed"), "{err}");
         server.join().unwrap();
     }
