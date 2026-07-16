@@ -70,7 +70,15 @@ pub fn connect(
     }
     match method[1] {
         0x02 => authenticate(&mut stream, token)?,
-        0x00 => {} // proxy accepted no-auth; isolation is then best-effort
+        // We only offered username/password (0x02). A proxy selecting no-auth
+        // (0x00) would silently drop stream isolation, so connections would
+        // share a circuit and exit; refuse it rather than proceed unisolated.
+        0x00 => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "proxy selected no-auth; refusing to drop circuit isolation",
+            ))
+        }
         0xff => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -225,6 +233,27 @@ mod tests {
 
         let stream = connect(&proxy, "relay.example", 443, "tok0", Duration::from_secs(5));
         assert!(stream.is_ok(), "connect failed: {:?}", stream.err());
+        server.join().unwrap();
+    }
+
+    /// A proxy that answers the greeting with no-auth (0x00), which was never
+    /// offered, must be refused: proceeding would drop circuit isolation.
+    #[test]
+    fn no_auth_selection_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut greet = [0u8; 3];
+            s.read_exact(&mut greet).unwrap();
+            s.write_all(&[0x05, 0x00]).unwrap(); // select no-auth
+        });
+
+        let err =
+            connect(&proxy, "relay.example", 443, "tok0", Duration::from_secs(5)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("isolation"), "{err}");
         server.join().unwrap();
     }
 
