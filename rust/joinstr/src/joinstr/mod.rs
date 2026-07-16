@@ -1786,3 +1786,57 @@ impl<'a> JoinstrInner<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use crate::nostr::PoolType;
+
+    const PUBKEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn sample_state(proxy: Option<String>) -> State {
+        State {
+            role: Role::Peer,
+            step: Step::Broadcast,
+            pool_secret_key: "deadbeef".into(),
+            relay: "wss://nos.lol".into(),
+            electrum: Some(("electrum.example".into(), 50002)),
+            proxy,
+            pool: Pool {
+                version: Some("1".into()),
+                id: "pool-id".into(),
+                network: Network::Signet,
+                pool_type: PoolType::Create,
+                public_key: PUBKEY.parse().unwrap(),
+                payload: None,
+            },
+            input: None,
+            output: None,
+            network: bitcoin::Network::Signet,
+            final_tx: None,
+            peers: vec![],
+            outputs: vec![],
+            inputs: vec![],
+        }
+    }
+
+    /// The proxy a round runs on must survive `state()` -> persist -> `restart()`,
+    /// otherwise a resumed round silently drops to clearnet.
+    #[test]
+    fn proxy_round_trips_through_state_serialization() {
+        let json = serde_json::to_string(&sample_state(Some("127.0.0.1:9050".into()))).unwrap();
+        let decoded: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.proxy.as_deref(), Some("127.0.0.1:9050"));
+    }
+
+    /// State serialized before `proxy` existed has no such key; `serde(default)`
+    /// must decode it as `None` (a direct connection) rather than failing to
+    /// deserialize and stranding a resumable round.
+    #[test]
+    fn state_without_proxy_field_defaults_to_none() {
+        let mut value = serde_json::to_value(sample_state(Some("127.0.0.1:9050".into()))).unwrap();
+        value.as_object_mut().unwrap().remove("proxy");
+        let decoded: State = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.proxy, None);
+    }
+}
