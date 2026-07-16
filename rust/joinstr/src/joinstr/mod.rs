@@ -104,6 +104,12 @@ pub struct State {
     pub pool_secret_key: String, /* nostr::Keys*/
     pub relay: String,
     pub electrum: Option<(String, u16)>,
+    /// SOCKS5 proxy the round runs over, carried so a resumed round keeps
+    /// using Tor rather than falling back to clearnet. `#[serde(default)]`
+    /// keeps state serialized before this field was added decodable (as
+    /// `None`, i.e. a direct connection).
+    #[serde(default)]
+    pub proxy: Option<String>,
     pub pool: Pool,
     pub input: Option<Coin>,
     pub output: Option<Address<NetworkUnchecked>>,
@@ -1032,6 +1038,7 @@ impl Joinstr<'_> {
             pool_secret_key,
             relay,
             electrum,
+            proxy,
             pool,
             input,
             output,
@@ -1043,11 +1050,8 @@ impl Joinstr<'_> {
         } = state;
         let secret_key = nostr::SecretKey::from_hex(pool_secret_key).map_err(|_| Error::PoolKey)?;
         let keys = Keys::new(secret_key);
-        // `State` predates proxy support and carries none, so a resumed round
-        // connects directly. The dart FFI never resumes (it drives
-        // `start_coinjoin_blocking` in one shot), so its Tor path is unaffected;
-        // wire a proxy into `State` if resume ever needs it.
-        let proxy: Option<String> = None;
+        // Resume over the same proxy the round was running on, so it keeps using
+        // Tor instead of falling back to clearnet.
         let j = Joinstr::new(keys, relay, proxy.clone(), name)?.network(network);
         let mut inner = j.inner.lock().expect("poisoned");
         inner.role = role;
@@ -1766,6 +1770,7 @@ impl<'a> JoinstrInner<'a> {
             pool_secret_key: keys.secret_key().to_secret_hex(),
             relay,
             electrum,
+            proxy: self.proxy.clone(),
             pool,
             input: self.input.clone(),
             output: self.output.clone().map(|a| a.as_unchecked().clone()),
