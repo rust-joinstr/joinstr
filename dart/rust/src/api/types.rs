@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use joinstr::bip39::Mnemonic;
 use joinstr::interface::{PeerConfig, PoolConfig};
+use joinstr::joinstr::Step;
 use joinstr::miniscript::bitcoin::{
     Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TxOut, Txid,
 };
@@ -259,6 +260,71 @@ impl FfiPool {
             public_key: pool.public_key.to_string(),
             version: pool.version.clone(),
         })
+    }
+}
+
+/// A coinjoin progress update, streamed to the caller as the round advances so
+/// it can render a step-by-step timeline. A plain struct (not an enum with
+/// data) so the bindings do not pull in `freezed`. `txid` is set on the
+/// terminal `Done` step, `error` on the terminal `Failed` step.
+pub struct FfiCoinjoinUpdate {
+    pub step: FfiCoinjoinStep,
+    pub txid: Option<String>,
+    pub error: Option<String>,
+}
+
+/// The coinjoin steps worth showing in a timeline. `Done`/`Failed` are the two
+/// terminal states the bindings synthesize; the crate's `Unconfigured`/
+/// `Configured`/`Failed` bookkeeping states collapse to `Other`.
+pub enum FfiCoinjoinStep {
+    Connecting,
+    Posting,
+    OutputRegistration,
+    InputRegistration,
+    Broadcast,
+    Mined,
+    Done,
+    Failed,
+    Other,
+}
+
+impl From<Step> for FfiCoinjoinStep {
+    fn from(step: Step) -> Self {
+        match step {
+            Step::Connecting => FfiCoinjoinStep::Connecting,
+            Step::Posting => FfiCoinjoinStep::Posting,
+            Step::OutputRegistration => FfiCoinjoinStep::OutputRegistration,
+            Step::InputRegistration => FfiCoinjoinStep::InputRegistration,
+            Step::Broadcast => FfiCoinjoinStep::Broadcast,
+            Step::Mined => FfiCoinjoinStep::Mined,
+            Step::Unconfigured | Step::Configured | Step::Failed => FfiCoinjoinStep::Other,
+        }
+    }
+}
+
+impl FfiCoinjoinUpdate {
+    pub(crate) fn step(step: Step) -> Self {
+        FfiCoinjoinUpdate {
+            step: FfiCoinjoinStep::from(step),
+            txid: None,
+            error: None,
+        }
+    }
+
+    pub(crate) fn done(txid: String) -> Self {
+        FfiCoinjoinUpdate {
+            step: FfiCoinjoinStep::Done,
+            txid: Some(txid),
+            error: None,
+        }
+    }
+
+    pub(crate) fn failed(message: String) -> Self {
+        FfiCoinjoinUpdate {
+            step: FfiCoinjoinStep::Failed,
+            txid: None,
+            error: Some(message),
+        }
     }
 }
 

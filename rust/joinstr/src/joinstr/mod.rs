@@ -861,6 +861,14 @@ impl Joinstr<'_> {
         self.inner.lock().expect("poisoned").status()
     }
 
+    /// The coinjoin step this instance is currently on. Cheap and lock-scoped
+    /// so it can be polled from another thread while `start_coinjoin_blocking`
+    /// runs, without the deadlock a `notif` callback would hit (that callback
+    /// is sometimes invoked while the inner lock is held).
+    pub fn current_step(&self) -> Step {
+        self.inner.lock().expect("poisoned").step
+    }
+
     /// Returns the current serializable state of the [`Joinstr`] instance.
     ///
     /// # Returns

@@ -50,6 +50,12 @@ fn wire__crate__api__joinstr__initiate_coinjoin_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     config: impl CstDecode<crate::api::types::FfiPoolConfig>,
     peer: impl CstDecode<crate::api::types::FfiPeerConfig>,
+    progress: impl CstDecode<
+        StreamSink<
+            crate::api::types::FfiCoinjoinUpdate,
+            flutter_rust_bridge::for_generated::DcoCodec,
+        >,
+    >,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -60,9 +66,11 @@ fn wire__crate__api__joinstr__initiate_coinjoin_impl(
         move || {
             let api_config = config.cst_decode();
             let api_peer = peer.cst_decode();
+            let api_progress = progress.cst_decode();
             move |context| {
                 transform_result_dco::<_, _, crate::api::error::JoinstrError>((move || {
-                    let output_ok = crate::api::joinstr::initiate_coinjoin(api_config, api_peer)?;
+                    let output_ok =
+                        crate::api::joinstr::initiate_coinjoin(api_config, api_peer, api_progress)?;
                     Ok(output_ok)
                 })())
             }
@@ -73,6 +81,12 @@ fn wire__crate__api__joinstr__join_coinjoin_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     pool_raw_json: impl CstDecode<String>,
     peer: impl CstDecode<crate::api::types::FfiPeerConfig>,
+    progress: impl CstDecode<
+        StreamSink<
+            crate::api::types::FfiCoinjoinUpdate,
+            flutter_rust_bridge::for_generated::DcoCodec,
+        >,
+    >,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -83,10 +97,14 @@ fn wire__crate__api__joinstr__join_coinjoin_impl(
         move || {
             let api_pool_raw_json = pool_raw_json.cst_decode();
             let api_peer = peer.cst_decode();
+            let api_progress = progress.cst_decode();
             move |context| {
                 transform_result_dco::<_, _, crate::api::error::JoinstrError>((move || {
-                    let output_ok =
-                        crate::api::joinstr::join_coinjoin(api_pool_raw_json, api_peer)?;
+                    let output_ok = crate::api::joinstr::join_coinjoin(
+                        api_pool_raw_json,
+                        api_peer,
+                        api_progress,
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -187,6 +205,23 @@ impl CstDecode<f64> for f64 {
         self
     }
 }
+impl CstDecode<crate::api::types::FfiCoinjoinStep> for i32 {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    fn cst_decode(self) -> crate::api::types::FfiCoinjoinStep {
+        match self {
+            0 => crate::api::types::FfiCoinjoinStep::Connecting,
+            1 => crate::api::types::FfiCoinjoinStep::Posting,
+            2 => crate::api::types::FfiCoinjoinStep::OutputRegistration,
+            3 => crate::api::types::FfiCoinjoinStep::InputRegistration,
+            4 => crate::api::types::FfiCoinjoinStep::Broadcast,
+            5 => crate::api::types::FfiCoinjoinStep::Mined,
+            6 => crate::api::types::FfiCoinjoinStep::Done,
+            7 => crate::api::types::FfiCoinjoinStep::Failed,
+            8 => crate::api::types::FfiCoinjoinStep::Other,
+            _ => unreachable!("Invalid variant for FfiCoinjoinStep: {}", self),
+        }
+    }
+}
 impl CstDecode<i32> for i32 {
     // Codec=Cst (C-struct based), see doc to use other codecs
     fn cst_decode(self) -> i32 {
@@ -217,6 +252,27 @@ impl CstDecode<u8> for u8 {
         self
     }
 }
+impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<
+        crate::api::types::FfiCoinjoinUpdate,
+        flutter_rust_bridge::for_generated::DcoCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
 impl SseDecode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -264,6 +320,39 @@ impl SseDecode for crate::api::types::FfiCoin {
             sequence: var_sequence,
             coin_path_depth: var_coinPathDepth,
             coin_path_index: var_coinPathIndex,
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::FfiCoinjoinStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::types::FfiCoinjoinStep::Connecting,
+            1 => crate::api::types::FfiCoinjoinStep::Posting,
+            2 => crate::api::types::FfiCoinjoinStep::OutputRegistration,
+            3 => crate::api::types::FfiCoinjoinStep::InputRegistration,
+            4 => crate::api::types::FfiCoinjoinStep::Broadcast,
+            5 => crate::api::types::FfiCoinjoinStep::Mined,
+            6 => crate::api::types::FfiCoinjoinStep::Done,
+            7 => crate::api::types::FfiCoinjoinStep::Failed,
+            8 => crate::api::types::FfiCoinjoinStep::Other,
+            _ => unreachable!("Invalid variant for FfiCoinjoinStep: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::FfiCoinjoinUpdate {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_step = <crate::api::types::FfiCoinjoinStep>::sse_decode(deserializer);
+        let mut var_txid = <Option<String>>::sse_decode(deserializer);
+        let mut var_error = <Option<String>>::sse_decode(deserializer);
+        return crate::api::types::FfiCoinjoinUpdate {
+            step: var_step,
+            txid: var_txid,
+            error: var_error,
         };
     }
 }
@@ -439,6 +528,11 @@ impl SseDecode for u8 {
     }
 }
 
+impl SseDecode for () {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
+}
+
 impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -514,6 +608,56 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::FfiCoin {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::types::FfiCoin {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::types::FfiCoin> for crate::api::types::FfiCoin {
     fn into_into_dart(self) -> crate::api::types::FfiCoin {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::FfiCoinjoinStep {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Connecting => 0.into_dart(),
+            Self::Posting => 1.into_dart(),
+            Self::OutputRegistration => 2.into_dart(),
+            Self::InputRegistration => 3.into_dart(),
+            Self::Broadcast => 4.into_dart(),
+            Self::Mined => 5.into_dart(),
+            Self::Done => 6.into_dart(),
+            Self::Failed => 7.into_dart(),
+            Self::Other => 8.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::FfiCoinjoinStep
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::FfiCoinjoinStep>
+    for crate::api::types::FfiCoinjoinStep
+{
+    fn into_into_dart(self) -> crate::api::types::FfiCoinjoinStep {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::FfiCoinjoinUpdate {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.step.into_into_dart().into_dart(),
+            self.txid.into_into_dart().into_dart(),
+            self.error.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::FfiCoinjoinUpdate
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::FfiCoinjoinUpdate>
+    for crate::api::types::FfiCoinjoinUpdate
+{
+    fn into_into_dart(self) -> crate::api::types::FfiCoinjoinUpdate {
         self
     }
 }
@@ -609,6 +753,25 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::error::JoinstrError>
     }
 }
 
+impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(format!("{:?}", self), serializer);
+    }
+}
+
+impl SseEncode
+    for StreamSink<
+        crate::api::types::FfiCoinjoinUpdate,
+        flutter_rust_bridge::for_generated::DcoCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -651,6 +814,38 @@ impl SseEncode for crate::api::types::FfiCoin {
         <u32>::sse_encode(self.sequence, serializer);
         <u32>::sse_encode(self.coin_path_depth, serializer);
         <Option<u32>>::sse_encode(self.coin_path_index, serializer);
+    }
+}
+
+impl SseEncode for crate::api::types::FfiCoinjoinStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::types::FfiCoinjoinStep::Connecting => 0,
+                crate::api::types::FfiCoinjoinStep::Posting => 1,
+                crate::api::types::FfiCoinjoinStep::OutputRegistration => 2,
+                crate::api::types::FfiCoinjoinStep::InputRegistration => 3,
+                crate::api::types::FfiCoinjoinStep::Broadcast => 4,
+                crate::api::types::FfiCoinjoinStep::Mined => 5,
+                crate::api::types::FfiCoinjoinStep::Done => 6,
+                crate::api::types::FfiCoinjoinStep::Failed => 7,
+                crate::api::types::FfiCoinjoinStep::Other => 8,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::types::FfiCoinjoinUpdate {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::types::FfiCoinjoinStep>::sse_encode(self.step, serializer);
+        <Option<String>>::sse_encode(self.txid, serializer);
+        <Option<String>>::sse_encode(self.error, serializer);
     }
 }
 
@@ -786,6 +981,11 @@ impl SseEncode for u8 {
     }
 }
 
+impl SseEncode for () {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
+}
+
 impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -813,6 +1013,33 @@ mod io {
 
     // Section: dart2rust
 
+    impl CstDecode<flutter_rust_bridge::for_generated::anyhow::Error>
+        for *mut wire_cst_list_prim_u_8_strict
+    {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> flutter_rust_bridge::for_generated::anyhow::Error {
+            unimplemented!()
+        }
+    }
+    impl
+        CstDecode<
+            StreamSink<
+                crate::api::types::FfiCoinjoinUpdate,
+                flutter_rust_bridge::for_generated::DcoCodec,
+            >,
+        > for *mut wire_cst_list_prim_u_8_strict
+    {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(
+            self,
+        ) -> StreamSink<
+            crate::api::types::FfiCoinjoinUpdate,
+            flutter_rust_bridge::for_generated::DcoCodec,
+        > {
+            let raw: String = self.cst_decode();
+            StreamSink::deserialize(raw)
+        }
+    }
     impl CstDecode<String> for *mut wire_cst_list_prim_u_8_strict {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> String {
@@ -851,6 +1078,16 @@ mod io {
                 sequence: self.sequence.cst_decode(),
                 coin_path_depth: self.coin_path_depth.cst_decode(),
                 coin_path_index: self.coin_path_index.cst_decode(),
+            }
+        }
+    }
+    impl CstDecode<crate::api::types::FfiCoinjoinUpdate> for wire_cst_ffi_coinjoin_update {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::types::FfiCoinjoinUpdate {
+            crate::api::types::FfiCoinjoinUpdate {
+                step: self.step.cst_decode(),
+                txid: self.txid.cst_decode(),
+                error: self.error.cst_decode(),
             }
         }
     }
@@ -952,6 +1189,20 @@ mod io {
             Self::new_with_null_ptr()
         }
     }
+    impl NewWithNullPtr for wire_cst_ffi_coinjoin_update {
+        fn new_with_null_ptr() -> Self {
+            Self {
+                step: Default::default(),
+                txid: core::ptr::null_mut(),
+                error: core::ptr::null_mut(),
+            }
+        }
+    }
+    impl Default for wire_cst_ffi_coinjoin_update {
+        fn default() -> Self {
+            Self::new_with_null_ptr()
+        }
+    }
     impl NewWithNullPtr for wire_cst_ffi_peer_config {
         fn new_with_null_ptr() -> Self {
             Self {
@@ -1025,8 +1276,9 @@ mod io {
         port_: i64,
         config: *mut wire_cst_ffi_pool_config,
         peer: *mut wire_cst_ffi_peer_config,
+        progress: *mut wire_cst_list_prim_u_8_strict,
     ) {
-        wire__crate__api__joinstr__initiate_coinjoin_impl(port_, config, peer)
+        wire__crate__api__joinstr__initiate_coinjoin_impl(port_, config, peer, progress)
     }
 
     #[unsafe(no_mangle)]
@@ -1034,8 +1286,9 @@ mod io {
         port_: i64,
         pool_raw_json: *mut wire_cst_list_prim_u_8_strict,
         peer: *mut wire_cst_ffi_peer_config,
+        progress: *mut wire_cst_list_prim_u_8_strict,
     ) {
-        wire__crate__api__joinstr__join_coinjoin_impl(port_, pool_raw_json, peer)
+        wire__crate__api__joinstr__join_coinjoin_impl(port_, pool_raw_json, peer, progress)
     }
 
     #[unsafe(no_mangle)]
@@ -1142,6 +1395,13 @@ mod io {
         sequence: u32,
         coin_path_depth: u32,
         coin_path_index: *mut u32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wire_cst_ffi_coinjoin_update {
+        step: i32,
+        txid: *mut wire_cst_list_prim_u_8_strict,
+        error: *mut wire_cst_list_prim_u_8_strict,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]

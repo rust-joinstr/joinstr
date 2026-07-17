@@ -2,13 +2,16 @@
 //! [`joinstr::interface`] and are blocking; flutter_rust_bridge runs them off
 //! the UI isolate so Dart awaits each as a `Future`.
 
+use crate::frb_generated::StreamSink;
 use joinstr::interface;
 use joinstr::log::warn;
 use joinstr::nostr::Pool;
 use zeroize::Zeroizing;
 
 use crate::api::error::JoinstrError;
-use crate::api::types::{BitcoinNetwork, FfiCoin, FfiPeerConfig, FfiPool, FfiPoolConfig};
+use crate::api::types::{
+    BitcoinNetwork, FfiCoin, FfiCoinjoinUpdate, FfiPeerConfig, FfiPool, FfiPoolConfig,
+};
 
 /// List spendable coins by scanning electrum over derivation indexes
 /// `[range_start, range_end)` on both the receive and change branches.
@@ -73,16 +76,31 @@ pub fn list_pools(
 pub fn initiate_coinjoin(
     config: FfiPoolConfig,
     peer: FfiPeerConfig,
-) -> Result<String, JoinstrError> {
+    progress: StreamSink<FfiCoinjoinUpdate>,
+) -> Result<(), JoinstrError> {
     let pool_config = config.into();
     let peer_config = peer.try_into()?;
-    let txid = interface::initiate_coinjoin(pool_config, peer_config)?;
-    Ok(txid.to_string())
+    let on_step = |step| {
+        let _ = progress.add(FfiCoinjoinUpdate::step(step));
+    };
+    match interface::initiate_coinjoin_with_progress(pool_config, peer_config, on_step) {
+        Ok(txid) => {
+            let _ = progress.add(FfiCoinjoinUpdate::done(txid.to_string()));
+        }
+        Err(e) => {
+            let _ = progress.add(FfiCoinjoinUpdate::failed(e.to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// Join an advertised pool, passing the `raw_json` of an [`FfiPool`] from
 /// [`list_pools`]. Blocks until the coinjoin is broadcast; returns its txid.
-pub fn join_coinjoin(pool_raw_json: String, peer: FfiPeerConfig) -> Result<String, JoinstrError> {
+pub fn join_coinjoin(
+    pool_raw_json: String,
+    peer: FfiPeerConfig,
+    progress: StreamSink<FfiCoinjoinUpdate>,
+) -> Result<(), JoinstrError> {
     let mut pool: Pool = joinstr::serde_json::from_str(&pool_raw_json)
         .map_err(|e| JoinstrError::new(format!("invalid pool json: {e}")))?;
     // `Pool::network` is `#[serde(skip_serializing)]` and defaults to mainnet on
@@ -90,6 +108,16 @@ pub fn join_coinjoin(pool_raw_json: String, peer: FfiPeerConfig) -> Result<Strin
     pool.network = peer.native_network();
 
     let peer_config = peer.try_into()?;
-    let txid = interface::join_coinjoin(pool, peer_config)?;
-    Ok(txid)
+    let on_step = |step| {
+        let _ = progress.add(FfiCoinjoinUpdate::step(step));
+    };
+    match interface::join_coinjoin_with_progress(pool, peer_config, on_step) {
+        Ok(txid) => {
+            let _ = progress.add(FfiCoinjoinUpdate::done(txid));
+        }
+        Err(e) => {
+            let _ = progress.add(FfiCoinjoinUpdate::failed(e.to_string()));
+        }
+    }
+    Ok(())
 }

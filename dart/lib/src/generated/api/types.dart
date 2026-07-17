@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `from_pool`, `native_network`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `try_from`, `try_from`
+// These functions are ignored because they are not marked as `pub`: `done`, `failed`, `from_pool`, `native_network`, `step`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `try_from`, `try_from`
 
 enum BitcoinNetwork {
   bitcoin,
@@ -59,6 +59,50 @@ class FfiCoin {
           sequence == other.sequence &&
           coinPathDepth == other.coinPathDepth &&
           coinPathIndex == other.coinPathIndex;
+}
+
+/// The coinjoin steps worth showing in a timeline. `Done`/`Failed` are the two
+/// terminal states the bindings synthesize; the crate's `Unconfigured`/
+/// `Configured`/`Failed` bookkeeping states collapse to `Other`.
+enum FfiCoinjoinStep {
+  connecting,
+  posting,
+  outputRegistration,
+  inputRegistration,
+  broadcast,
+  mined,
+  done,
+  failed,
+  other,
+  ;
+}
+
+/// A coinjoin progress update, streamed to the caller as the round advances so
+/// it can render a step-by-step timeline. A plain struct (not an enum with
+/// data) so the bindings do not pull in `freezed`. `txid` is set on the
+/// terminal `Done` step, `error` on the terminal `Failed` step.
+class FfiCoinjoinUpdate {
+  final FfiCoinjoinStep step;
+  final String? txid;
+  final String? error;
+
+  const FfiCoinjoinUpdate({
+    required this.step,
+    this.txid,
+    this.error,
+  });
+
+  @override
+  int get hashCode => step.hashCode ^ txid.hashCode ^ error.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FfiCoinjoinUpdate &&
+          runtimeType == other.runtimeType &&
+          step == other.step &&
+          txid == other.txid &&
+          error == other.error;
 }
 
 /// A single peer's coinjoin parameters.

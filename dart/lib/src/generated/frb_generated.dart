@@ -82,10 +82,10 @@ class joinstr extends BaseEntrypoint<joinstrApi, joinstrApiImpl, joinstrWire> {
 }
 
 abstract class joinstrApi extends BaseApi {
-  Future<String> crateApiJoinstrInitiateCoinjoin(
+  Stream<FfiCoinjoinUpdate> crateApiJoinstrInitiateCoinjoin(
       {required FfiPoolConfig config, required FfiPeerConfig peer});
 
-  Future<String> crateApiJoinstrJoinCoinjoin(
+  Stream<FfiCoinjoinUpdate> crateApiJoinstrJoinCoinjoin(
       {required String poolRawJson, required FfiPeerConfig peer});
 
   Future<List<FfiCoin>> crateApiJoinstrListCoins(
@@ -113,54 +113,61 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   });
 
   @override
-  Future<String> crateApiJoinstrInitiateCoinjoin(
+  Stream<FfiCoinjoinUpdate> crateApiJoinstrInitiateCoinjoin(
       {required FfiPoolConfig config, required FfiPeerConfig peer}) {
-    return handler.executeNormal(NormalTask(
+    final progress = RustStreamSink<FfiCoinjoinUpdate>();
+    unawaited(handler.executeNormal(NormalTask(
       callFfi: (port_) {
         var arg0 = cst_encode_box_autoadd_ffi_pool_config(config);
         var arg1 = cst_encode_box_autoadd_ffi_peer_config(peer);
+        var arg2 = cst_encode_StreamSink_ffi_coinjoin_update_Dco(progress);
         return wire.wire__crate__api__joinstr__initiate_coinjoin(
-            port_, arg0, arg1);
+            port_, arg0, arg1, arg2);
       },
       codec: DcoCodec(
-        decodeSuccessData: dco_decode_String,
+        decodeSuccessData: dco_decode_unit,
         decodeErrorData: dco_decode_joinstr_error,
       ),
       constMeta: kCrateApiJoinstrInitiateCoinjoinConstMeta,
-      argValues: [config, peer],
+      argValues: [config, peer, progress],
       apiImpl: this,
-    ));
+    )));
+    return progress.stream;
   }
 
   TaskConstMeta get kCrateApiJoinstrInitiateCoinjoinConstMeta =>
       const TaskConstMeta(
         debugName: "initiate_coinjoin",
-        argNames: ["config", "peer"],
+        argNames: ["config", "peer", "progress"],
       );
 
   @override
-  Future<String> crateApiJoinstrJoinCoinjoin(
+  Stream<FfiCoinjoinUpdate> crateApiJoinstrJoinCoinjoin(
       {required String poolRawJson, required FfiPeerConfig peer}) {
-    return handler.executeNormal(NormalTask(
+    final progress = RustStreamSink<FfiCoinjoinUpdate>();
+    unawaited(handler.executeNormal(NormalTask(
       callFfi: (port_) {
         var arg0 = cst_encode_String(poolRawJson);
         var arg1 = cst_encode_box_autoadd_ffi_peer_config(peer);
-        return wire.wire__crate__api__joinstr__join_coinjoin(port_, arg0, arg1);
+        var arg2 = cst_encode_StreamSink_ffi_coinjoin_update_Dco(progress);
+        return wire.wire__crate__api__joinstr__join_coinjoin(
+            port_, arg0, arg1, arg2);
       },
       codec: DcoCodec(
-        decodeSuccessData: dco_decode_String,
+        decodeSuccessData: dco_decode_unit,
         decodeErrorData: dco_decode_joinstr_error,
       ),
       constMeta: kCrateApiJoinstrJoinCoinjoinConstMeta,
-      argValues: [poolRawJson, peer],
+      argValues: [poolRawJson, peer, progress],
       apiImpl: this,
-    ));
+    )));
+    return progress.stream;
   }
 
   TaskConstMeta get kCrateApiJoinstrJoinCoinjoinConstMeta =>
       const TaskConstMeta(
         debugName: "join_coinjoin",
-        argNames: ["poolRawJson", "peer"],
+        argNames: ["poolRawJson", "peer", "progress"],
       );
 
   @override
@@ -246,6 +253,19 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
       );
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AnyhowException(raw as String);
+  }
+
+  @protected
+  RustStreamSink<FfiCoinjoinUpdate>
+      dco_decode_StreamSink_ffi_coinjoin_update_Dco(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as String;
@@ -295,6 +315,25 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
       sequence: dco_decode_u_32(arr[4]),
       coinPathDepth: dco_decode_u_32(arr[5]),
       coinPathIndex: dco_decode_opt_box_autoadd_u_32(arr[6]),
+    );
+  }
+
+  @protected
+  FfiCoinjoinStep dco_decode_ffi_coinjoin_step(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return FfiCoinjoinStep.values[raw as int];
+  }
+
+  @protected
+  FfiCoinjoinUpdate dco_decode_ffi_coinjoin_update(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return FfiCoinjoinUpdate(
+      step: dco_decode_ffi_coinjoin_step(arr[0]),
+      txid: dco_decode_opt_String(arr[1]),
+      error: dco_decode_opt_String(arr[2]),
     );
   }
 
@@ -422,6 +461,27 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   }
 
   @protected
+  void dco_decode_unit(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return;
+  }
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_String(deserializer);
+    return AnyhowException(inner);
+  }
+
+  @protected
+  RustStreamSink<FfiCoinjoinUpdate>
+      sse_decode_StreamSink_ffi_coinjoin_update_Dco(
+          SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
@@ -479,6 +539,23 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
         sequence: var_sequence,
         coinPathDepth: var_coinPathDepth,
         coinPathIndex: var_coinPathIndex);
+  }
+
+  @protected
+  FfiCoinjoinStep sse_decode_ffi_coinjoin_step(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return FfiCoinjoinStep.values[inner];
+  }
+
+  @protected
+  FfiCoinjoinUpdate sse_decode_ffi_coinjoin_update(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_step = sse_decode_ffi_coinjoin_step(deserializer);
+    var var_txid = sse_decode_opt_String(deserializer);
+    var var_error = sse_decode_opt_String(deserializer);
+    return FfiCoinjoinUpdate(step: var_step, txid: var_txid, error: var_error);
   }
 
   @protected
@@ -634,6 +711,11 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   }
 
   @protected
+  void sse_decode_unit(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
@@ -649,6 +731,12 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   double cst_encode_f_64(double raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw;
+  }
+
+  @protected
+  int cst_encode_ffi_coinjoin_step(FfiCoinjoinStep raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return cst_encode_i_32(raw.index);
   }
 
   @protected
@@ -673,6 +761,32 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   int cst_encode_u_8(int raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw;
+  }
+
+  @protected
+  void cst_encode_unit(void raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return raw;
+  }
+
+  @protected
+  void sse_encode_AnyhowException(
+      AnyhowException self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_StreamSink_ffi_coinjoin_update_Dco(
+      RustStreamSink<FfiCoinjoinUpdate> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+        self.setupAndSerialize(
+            codec: DcoCodec(
+          decodeSuccessData: dco_decode_ffi_coinjoin_update,
+          decodeErrorData: dco_decode_AnyhowException,
+        )),
+        serializer);
   }
 
   @protected
@@ -724,6 +838,22 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
     sse_encode_u_32(self.sequence, serializer);
     sse_encode_u_32(self.coinPathDepth, serializer);
     sse_encode_opt_box_autoadd_u_32(self.coinPathIndex, serializer);
+  }
+
+  @protected
+  void sse_encode_ffi_coinjoin_step(
+      FfiCoinjoinStep self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_ffi_coinjoin_update(
+      FfiCoinjoinUpdate self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_ffi_coinjoin_step(self.step, serializer);
+    sse_encode_opt_String(self.txid, serializer);
+    sse_encode_opt_String(self.error, serializer);
   }
 
   @protected
@@ -845,6 +975,11 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   void sse_encode_u_8(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self);
+  }
+
+  @protected
+  void sse_encode_unit(void self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
   }
 
   @protected

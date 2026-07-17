@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     electrum::Client,
-    joinstr::Joinstr,
+    joinstr::{Joinstr, Step},
     nostr::{sync::NostrClient, Pool},
     signer::{Coin, CoinPath, WpkhHotSigner},
     utils::now,
@@ -28,6 +28,8 @@ pub enum Error {
     /// The coinjoin ended without a final transaction: the pool timed out
     /// before enough peers registered, or a peer aborted.
     CoinjoinNotFinalized,
+    /// The worker thread running the blocking coinjoin panicked.
+    CoinjoinThreadPanicked,
     /// `list_coins` was given a range whose end precedes its start.
     InvertedScanRange {
         start: u32,
@@ -90,6 +92,9 @@ impl Display for Error {
             Error::Electrum(e) => write!(f, "Electrum error: {:?}", e),
             Error::CoinjoinNotFinalized => {
                 write!(f, "Coinjoin did not produce a final transaction")
+            }
+            Error::CoinjoinThreadPanicked => {
+                write!(f, "Coinjoin worker thread panicked")
             }
             Error::InvertedScanRange { start, end } => {
                 write!(f, "invalid range: end {end} is before start {start}")
@@ -179,6 +184,19 @@ pub fn list_coins(
 /// * `peer` - information about the peer
 ///
 pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, Error> {
+    initiate_coinjoin_with_progress(config, peer, |_| {})
+}
+
+/// Like [`initiate_coinjoin`], but reports each coinjoin [`Step`] to `on_step`
+/// as it happens, so a caller can render a progress timeline. The blocking
+/// coinjoin runs on a worker thread while this polls the current step; polling
+/// (rather than the `notif` callback) avoids the deadlock that callback hits
+/// when it fires while the inner lock is held.
+pub fn initiate_coinjoin_with_progress<F: Fn(Step)>(
+    config: PoolConfig,
+    peer: PeerConfig,
+    on_step: F,
+) -> Result<Txid, Error> {
     // `max_duration` arrives unvalidated from the bindings. An unchecked add
     // panics in debug and wraps to a past timestamp in release, creating a pool
     // that is born expired.
@@ -210,20 +228,47 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
     let client = Client::new_with_proxy(&url, port, proxy)?;
     signer.set_client(client);
 
-    let addr = peer.output;
-    let coin = peer.input;
+    initiator.set_coin(peer.input)?;
+    initiator.set_address(peer.output)?;
 
-    initiator.set_coin(coin)?;
-    initiator.set_address(addr)?;
+    run_coinjoin_with_progress(initiator, signer, None, on_step)
+}
 
-    initiator.start_coinjoin_blocking(None, Some(signer.clone()), || {})?;
+/// Runs `start_coinjoin_blocking` on a worker thread, polling the step and
+/// forwarding each change to `on_step`, and returns the final txid.
+fn run_coinjoin_with_progress<F: Fn(Step)>(
+    joinstr: Joinstr<'static>,
+    signer: WpkhHotSigner,
+    pool: Option<Pool>,
+    on_step: F,
+) -> Result<Txid, Error> {
+    let progress = joinstr.clone();
+    let mut runner = joinstr;
+    let handle = std::thread::spawn(move || -> Result<Txid, Error> {
+        runner.start_coinjoin_blocking(pool, Some(signer), || {})?;
+        Ok(runner
+            .final_tx()
+            .ok_or(Error::CoinjoinNotFinalized)?
+            .compute_txid())
+    });
 
-    let txid = initiator
-        .final_tx()
-        .ok_or(Error::CoinjoinNotFinalized)?
-        .compute_txid();
+    let mut last: Option<Step> = None;
+    let mut report = |step: Step| {
+        if last != Some(step) {
+            on_step(step);
+            last = Some(step);
+        }
+    };
 
-    Ok(txid)
+    while !handle.is_finished() {
+        report(progress.current_step());
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    // Surface any step reached in the gap between the last poll and the thread
+    // finishing (e.g. Broadcast/Mined).
+    report(progress.current_step());
+
+    handle.join().map_err(|_| Error::CoinjoinThreadPanicked)?
 }
 
 /// List available pools
@@ -293,16 +338,24 @@ pub fn list_pools(
 /// * `peer` - information about the peer
 ///
 pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, Error> {
+    join_coinjoin_with_progress(pool, peer, |_| {})
+}
+
+/// Like [`join_coinjoin`], but reports each coinjoin [`Step`] to `on_step` as it
+/// happens (see [`initiate_coinjoin_with_progress`]).
+pub fn join_coinjoin_with_progress<F: Fn(Step)>(
+    pool: Pool,
+    peer: PeerConfig,
+    on_step: F,
+) -> Result<String /* Txid */, Error> {
     let (url, port) = (peer.electrum_address, peer.electrum_port);
     let proxy = peer.proxy;
-    let addr = peer.output;
-    let coin = peer.input;
-    let mut joinstr_peer = Joinstr::new_peer_with_electrum(
+    let joinstr_peer = Joinstr::new_peer_with_electrum(
         peer.relay.clone(),
         &pool,
         (&url, port),
-        coin,
-        addr,
+        peer.input,
+        peer.output,
         peer.network,
         proxy.clone(),
         "peer",
@@ -317,15 +370,8 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
     // Pass the pool so the peer JOINS it. `start_coinjoin_blocking(None, ..)`
     // takes the initiator branch and broadcasts a fresh pool instead, so the
     // joiner would never connect to the pool it meant to join.
-    joinstr_peer.start_coinjoin_blocking(Some(pool), Some(signer.clone()), || {})?;
-
-    let txid = joinstr_peer
-        .final_tx()
-        .ok_or(Error::CoinjoinNotFinalized)?
-        .compute_txid()
-        .to_string();
-
-    Ok(txid)
+    let txid = run_coinjoin_with_progress(joinstr_peer, signer, Some(pool), on_step)?;
+    Ok(txid.to_string())
 }
 
 #[cfg(test)]
