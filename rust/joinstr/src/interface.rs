@@ -165,14 +165,25 @@ pub fn list_coins(
     let client = Client::new_with_proxy(&electrum_address, electrum_port, proxy)?;
     signer.set_client(client);
 
+    // Scan every address, but do not let a failing query masquerade as an
+    // empty wallet: if we reach the end having found nothing while at least one
+    // query errored, surface that error instead of an empty list.
+    let mut first_error = None;
     for i in range.0..range.1 {
-        let recv = CoinPath::new(0, i);
-        let change = CoinPath::new(1, i);
-        let _ = signer.get_coins_at(recv);
-        let _ = signer.get_coins_at(change);
+        for depth in [0, 1] {
+            if let Err(e) = signer.get_coins_at(CoinPath::new(depth, i)) {
+                first_error.get_or_insert(e);
+            }
+        }
     }
 
-    let coins = signer.list_coins().into_iter().map(|c| c.1).collect();
+    let coins: Vec<Coin> = signer.list_coins().into_iter().map(|c| c.1).collect();
+
+    if coins.is_empty() {
+        if let Some(e) = first_error {
+            return Err(e.into());
+        }
+    }
 
     Ok(coins)
 }

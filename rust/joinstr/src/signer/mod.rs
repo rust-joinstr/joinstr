@@ -443,6 +443,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bip84_testnet_vector() {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon \
+                        abandon abandon abandon abandon abandon about";
+        let signer = WpkhHotSigner::new_from_mnemonics(Network::Testnet, mnemonic).unwrap();
+        let recv0 = signer
+            .address_at(&CoinPath {
+                depth: 0,
+                index: Some(0),
+            })
+            .unwrap();
+        println!("BIP84 testnet m/84'/1'/0'/0/0 = {recv0}");
+        assert_eq!(
+            recv0.to_string(),
+            "tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl"
+        );
+    }
+
+    #[test]
     fn create_and_sign() {
         let signer = WpkhHotSigner::new(Network::Regtest).unwrap();
 
