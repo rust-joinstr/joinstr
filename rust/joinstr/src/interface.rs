@@ -51,6 +51,10 @@ pub enum Error {
 /// unbounded span (e.g. `0..u32::MAX`) would hang the caller indefinitely.
 pub const MAX_SCAN_SPAN: u32 = 100_000;
 
+/// How many addresses `list_coins` asks for in a single electrum batch.
+/// Kept modest because servers cap how large a batch they accept.
+const SCAN_BATCH_SIZE: usize = 50;
+
 impl From<crate::nostr::error::Error> for Error {
     fn from(value: crate::nostr::error::Error) -> Self {
         Self::NostrClient(value)
@@ -165,15 +169,19 @@ pub fn list_coins(
     let client = Client::new_with_proxy(&electrum_address, electrum_port, proxy)?;
     signer.set_client(client);
 
-    // Scan every address, but do not let a failing query masquerade as an
-    // empty wallet: if we reach the end having found nothing while at least one
-    // query errored, surface that error instead of an empty list.
+    // Scan in batches: one round trip per address is unusable over tor, and the
+    // whole range is scanned in a handful of requests instead. Chunked rather
+    // than sent as one huge batch because servers cap the batch size.
+    let paths: Vec<CoinPath> = (range.0..range.1)
+        .flat_map(|i| [CoinPath::new(0, i), CoinPath::new(1, i)])
+        .collect();
+
+    // Do not let a failing query masquerade as an empty wallet: if the scan
+    // finds nothing while a batch errored, surface that error.
     let mut first_error = None;
-    for i in range.0..range.1 {
-        for depth in [0, 1] {
-            if let Err(e) = signer.get_coins_at(CoinPath::new(depth, i)) {
-                first_error.get_or_insert(e);
-            }
+    for chunk in paths.chunks(SCAN_BATCH_SIZE) {
+        if let Err(e) = signer.get_coins_at_batch(chunk) {
+            first_error.get_or_insert(e);
         }
     }
 

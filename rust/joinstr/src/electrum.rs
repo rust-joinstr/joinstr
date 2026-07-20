@@ -234,6 +234,84 @@ impl Client {
         id
     }
 
+    /// Fetch the unspent coins of many scripts in a single batched round trip.
+    ///
+    /// Scanning address by address costs one round trip per address, which is
+    /// unusable over tor. Results are returned in the same order as `scripts`.
+    /// `listunspent` also reports only unspent outputs, so unlike walking the
+    /// history there is no need to fetch and filter whole transactions.
+    pub fn list_unspent_batch(
+        &mut self,
+        scripts: &[ScriptBuf],
+    ) -> Result<Vec<Vec<(TxOut, OutPoint)>>, Error> {
+        if scripts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut requests = Vec::with_capacity(scripts.len());
+        let mut position = HashMap::new();
+        for (i, script) in scripts.iter().enumerate() {
+            let request = Request::sh_list_unspent(script).id(self.id());
+            position.insert(request.id, i);
+            self.index.insert(request.id, request.clone());
+            requests.push(request);
+        }
+
+        let send = self.inner.try_send_batch(requests.iter().collect());
+        if let Err(e) = send {
+            for request in &requests {
+                self.index.remove(&request.id);
+            }
+            return Err(e.into());
+        }
+
+        let mut out = vec![Vec::new(); scripts.len()];
+        let mut pending = requests.len();
+        let mut result: Result<(), Error> = Ok(());
+        // A batch may come back split over several messages, so keep reading
+        // until every request has been answered.
+        while pending > 0 {
+            let responses = match self.inner.recv(&self.index) {
+                Ok(r) => r,
+                Err(e) => {
+                    result = Err(e.into());
+                    break;
+                }
+            };
+            for response in responses {
+                if let Response::SHListUnspent(r) = response {
+                    if let Some(i) = position.remove(&r.id) {
+                        self.index.remove(&r.id);
+                        pending -= 1;
+                        out[i] = r
+                            .unspent
+                            .into_iter()
+                            .map(|u| {
+                                (
+                                    TxOut {
+                                        value: Amount::from_sat(u.value as u64),
+                                        script_pubkey: scripts[i].clone(),
+                                    },
+                                    OutPoint {
+                                        txid: u.txid,
+                                        vout: u.vout as u32,
+                                    },
+                                )
+                            })
+                            .collect();
+                    }
+                }
+            }
+        }
+
+        for id in position.keys() {
+            self.index.remove(id);
+        }
+        result?;
+
+        Ok(out)
+    }
+
     pub fn listen<RQ, RS>(self) -> (mpsc::Sender<RQ>, mpsc::Receiver<RS>)
     where
         RQ: Into<CoinRequest> + Debug + Send + 'static,

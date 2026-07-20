@@ -244,6 +244,44 @@ impl WpkhHotSigner {
         }
     }
 
+    /// Fetch the coins of many [`CoinPath`]s in a single batched round trip and
+    /// add them to [`WpkhHotSigner::coins`], returning the number added.
+    ///
+    /// Scanning one [`CoinPath`] at a time via [`WpkhHotSigner::get_coins_at()`]
+    /// costs a round trip per address, which is far too slow over tor.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    ///   - an electrum request fails.
+    ///   - there is no electrum client.
+    pub fn get_coins_at_batch(&mut self, coin_paths: &[CoinPath]) -> Result<usize, Error> {
+        let mut spks = Vec::with_capacity(coin_paths.len());
+        for coin_path in coin_paths {
+            spks.push(self.spk_at(coin_path)?);
+        }
+
+        let client = self.client.as_mut().ok_or(Error::NoElectrumClient)?;
+        let batch = client.list_unspent_batch(&spks)?;
+
+        let mut count = 0;
+        for (coin_path, coins) in coin_paths.iter().zip(batch) {
+            for (txout, outpoint) in coins {
+                let input_data = Coin {
+                    txout,
+                    outpoint,
+                    // TODO: should we enable RBF?
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    coin_path: *coin_path,
+                };
+                self.coins.entry(*coin_path).or_default().push(input_data);
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Returns a list of coins copied from [`WpkhHotSigner::coins`]
     ///
     /// Note: [`WpkhHotSigner::get_coins_at()`] should be call before in order to
