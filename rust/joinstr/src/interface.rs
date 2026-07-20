@@ -52,8 +52,10 @@ pub enum Error {
 pub const MAX_SCAN_SPAN: u32 = 100_000;
 
 /// How many addresses `list_coins` asks for in a single electrum batch.
-/// Kept modest because servers cap how large a batch they accept.
-const SCAN_BATCH_SIZE: usize = 50;
+/// Kept small because servers cap how large a batch they accept: blockstream's
+/// electrs drops a request batch somewhere above 20 items (returning EOF), so
+/// this stays well under that while still cutting round trips ~10x.
+const SCAN_BATCH_SIZE: usize = 10;
 
 impl From<crate::nostr::error::Error> for Error {
     fn from(value: crate::nostr::error::Error) -> Self {
