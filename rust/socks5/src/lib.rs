@@ -135,6 +135,13 @@ pub fn connect(
     let mut discard = vec![0u8; bound_len + 2]; // address + port
     read_exact(&mut stream, &mut discard)?;
 
+    // Drop the handshake deadline before handing the socket back: it bounded the
+    // SOCKS negotiation only. Left in place, a caller that never sets its own
+    // timeout would inherit it and see a slow read (a coinjoin waiting minutes
+    // for peers over tor) fail as `WouldBlock` instead of blocking.
+    stream.set_read_timeout(None)?;
+    stream.set_write_timeout(None)?;
+
     Ok(stream)
 }
 

@@ -51,6 +51,15 @@ impl From<raw_client::Error> for Error {
     }
 }
 
+impl Error {
+    /// Whether this error is worth reconnecting and retrying once. Transport and
+    /// framing failures (dropped/stale tor circuit, `WouldBlock`, a desynced
+    /// response) are; logical outcomes (tx absent, unparseable) are not.
+    fn is_retryable(&self) -> bool {
+        matches!(self, Error::Electrum(_) | Error::WrongResponse)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum CoinStatus {
     Unconfirmed,
@@ -157,13 +166,28 @@ pub struct Client {
     url: String,
     port: u16,
     proxy: Option<String>,
+    // `url` has the `ssl://` scheme stripped, so remember whether it was there:
+    // a reconnect that dropped TLS would talk plaintext to an SSL-only port.
+    ssl: bool,
 }
 
 impl Clone for Client {
     fn clone(&self) -> Self {
         // Preserve the proxy: the signer clones its electrum client, and a
         // clone that reconnected directly would leak the real IP mid-coinjoin.
-        Client::new_with_proxy(&self.url, self.port, self.proxy.clone()).unwrap()
+        // Preserve ssl too, or the clone would reconnect in plaintext.
+        let mut inner =
+            RawClient::new_ssl_maybe(&self.url, self.port, self.ssl).proxy(self.proxy.clone());
+        inner.try_connect().expect("electrum reconnect on clone");
+        Client {
+            inner,
+            index: HashMap::new(),
+            last_id: 0,
+            url: self.url.clone(),
+            port: self.port,
+            proxy: self.proxy.clone(),
+            ssl: self.ssl,
+        }
     }
 }
 
@@ -197,7 +221,37 @@ impl Client {
             url: address,
             port,
             proxy,
+            ssl,
         })
+    }
+
+    /// Re-establish the connection after it dropped or went stale (common over
+    /// tor while a coinjoin waits minutes for peers). Rebuilds the inner client
+    /// from the stored url/port/proxy/ssl and clears any in-flight request ids.
+    pub fn reconnect(&mut self) -> Result<(), Error> {
+        let mut inner =
+            RawClient::new_ssl_maybe(&self.url, self.port, self.ssl).proxy(self.proxy.clone());
+        inner.try_connect()?;
+        self.inner = inner;
+        self.index.clear();
+        Ok(())
+    }
+
+    /// Run an idempotent request, and if it fails on a dropped/stale connection
+    /// reconnect once and try again. Read requests routed through here are safe
+    /// to repeat, so a single reconnect turns a torn tor circuit into a hiccup
+    /// instead of a failed coinjoin.
+    fn with_reconnect<T>(
+        &mut self,
+        mut op: impl FnMut(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        match op(self) {
+            Err(e) if e.is_retryable() => {
+                self.reconnect()?;
+                op(self)
+            }
+            other => other,
+        }
     }
 
     /// Create a new local electrum client: SSL certificate validation id disabled in
@@ -218,6 +272,7 @@ impl Client {
             url: address,
             port,
             proxy: None,
+            ssl,
         })
     }
 
@@ -241,6 +296,13 @@ impl Client {
     /// `listunspent` also reports only unspent outputs, so unlike walking the
     /// history there is no need to fetch and filter whole transactions.
     pub fn list_unspent_batch(
+        &mut self,
+        scripts: &[ScriptBuf],
+    ) -> Result<Vec<Vec<(TxOut, OutPoint)>>, Error> {
+        self.with_reconnect(|c| c.list_unspent_batch_inner(scripts))
+    }
+
+    fn list_unspent_batch_inner(
         &mut self,
         scripts: &[ScriptBuf],
     ) -> Result<Vec<Vec<(TxOut, OutPoint)>>, Error> {
@@ -582,6 +644,10 @@ impl Client {
     ///   - the response is not of expected type
     ///   - the transaction does not exists
     pub fn get_tx(&mut self, txid: Txid) -> Result<Transaction, Error> {
+        self.with_reconnect(|c| c.get_tx_inner(txid))
+    }
+
+    fn get_tx_inner(&mut self, txid: Txid) -> Result<Transaction, Error> {
         let request = Request::tx_get(txid).id(self.id());
         self.inner.try_send(&request)?;
         let req_id = request.id;
@@ -671,6 +737,10 @@ impl Client {
     ///   - fail sending the request
     ///   - receive a wrong response
     pub fn get_coins_tx_at(&mut self, script: &Script) -> Result<Vec<Txid>, Error> {
+        self.with_reconnect(|c| c.get_coins_tx_at_inner(script))
+    }
+
+    fn get_coins_tx_at_inner(&mut self, script: &Script) -> Result<Vec<Txid>, Error> {
         let request = Request::sh_get_history(script).id(self.id());
         self.inner.try_send(&request)?;
         let req_id = request.id;
@@ -703,6 +773,10 @@ impl Client {
     ///   - fail to send the request
     ///   - get a wrong response
     pub fn broadcast(&mut self, tx: &Transaction) -> Result<(), Error> {
+        self.with_reconnect(|c| c.broadcast_inner(tx))
+    }
+
+    fn broadcast_inner(&mut self, tx: &Transaction) -> Result<(), Error> {
         let raw_tx = serialize_hex(tx);
         log::debug!("electrum::Client().broadcast(): {:?}", raw_tx);
         let request = Request::tx_broadcast(raw_tx);

@@ -115,6 +115,25 @@ fn list_coins_stops_at_the_gap_limit() {
     assert_eq!(coins[0].txout.value, Amount::from_btc(0.01).unwrap());
 }
 
+// A coinjoin waits minutes over tor, so the electrum connection can go stale
+// mid-round; the client must recover by reconnecting. Reconnect explicitly and
+// confirm a request still succeeds on the rebuilt connection.
+#[test]
+fn client_recovers_after_reconnect() {
+    let (mut signer, mut client, _electrsd, _bitcoind) = funded_wallet(&[0.04]);
+    let paths: Vec<CoinPath> = (0..5)
+        .flat_map(|i| [CoinPath::new(0, i), CoinPath::new(1, i)])
+        .collect();
+
+    client.reconnect().unwrap();
+    signer.set_client(client);
+    assert_eq!(
+        signer.get_coins_at_batch(&paths).unwrap(),
+        1,
+        "a request after reconnect must succeed on the rebuilt connection"
+    );
+}
+
 #[test]
 fn batched_scan_of_empty_wallet_finds_nothing() {
     let (mut signer, client, _electrsd, _bitcoind) = funded_wallet(&[]);
