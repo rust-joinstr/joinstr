@@ -57,6 +57,20 @@ pub const MAX_SCAN_SPAN: u32 = 100_000;
 /// this stays well under that while still cutting round trips ~10x.
 const SCAN_BATCH_SIZE: usize = 10;
 
+/// Derivation indexes per batch. Each index queries both the receive and change
+/// chain, so a batch of [`SCAN_BATCH_SIZE`] addresses covers half that many.
+const INDEXES_PER_BATCH: u32 = SCAN_BATCH_SIZE as u32 / 2;
+
+/// Stop scanning once this many consecutive indexes come back empty. Like a
+/// wallet gap limit, this lets a typical wallet (coins in the low indexes)
+/// finish in a batch or two instead of scanning the whole range, which matters
+/// over tor where every batch is a round trip. Matches Bull's stop gap of 20.
+const SCAN_STOP_GAP: u32 = 20;
+
+/// How many times to retry a batch that errors before giving up on it. A single
+/// dropped tor circuit should not fail the whole scan.
+const BATCH_RETRIES: usize = 2;
+
 impl From<crate::nostr::error::Error> for Error {
     fn from(value: crate::nostr::error::Error) -> Self {
         Self::NostrClient(value)
@@ -171,20 +185,52 @@ pub fn list_coins(
     let client = Client::new_with_proxy(&electrum_address, electrum_port, proxy)?;
     signer.set_client(client);
 
-    // Scan in batches: one round trip per address is unusable over tor, and the
-    // whole range is scanned in a handful of requests instead. Chunked rather
-    // than sent as one huge batch because servers cap the batch size.
-    let paths: Vec<CoinPath> = (range.0..range.1)
-        .flat_map(|i| [CoinPath::new(0, i), CoinPath::new(1, i)])
-        .collect();
-
-    // Do not let a failing query masquerade as an empty wallet: if the scan
-    // finds nothing while a batch errored, surface that error.
+    // Scan in batches: one round trip per address is unusable over tor, so the
+    // range is covered in a handful of batched requests. Stop early once a gap
+    // of empty indexes is seen (a typical wallet finishes in a batch or two),
+    // and retry a batch that errors so one dropped tor circuit does not sink
+    // the whole scan.
     let mut first_error = None;
-    for chunk in paths.chunks(SCAN_BATCH_SIZE) {
-        if let Err(e) = signer.get_coins_at_batch(chunk) {
-            first_error.get_or_insert(e);
+    let mut consecutive_empty = 0u32;
+    let mut index = range.0;
+    while index < range.1 {
+        let end = (index + INDEXES_PER_BATCH).min(range.1);
+        let chunk: Vec<CoinPath> = (index..end)
+            .flat_map(|i| [CoinPath::new(0, i), CoinPath::new(1, i)])
+            .collect();
+
+        let mut found = None;
+        for attempt in 0..=BATCH_RETRIES {
+            match signer.get_coins_at_batch(&chunk) {
+                Ok(n) => {
+                    found = Some(n);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == BATCH_RETRIES {
+                        first_error.get_or_insert(e);
+                    } else {
+                        sleep(Duration::from_millis(300));
+                    }
+                }
+            }
         }
+
+        match found {
+            // A coin resets the gap; a confirmed-empty batch extends it. A batch
+            // that failed every retry does neither: it must not be mistaken for
+            // an empty stretch and trigger an early stop.
+            Some(n) if n > 0 => consecutive_empty = 0,
+            Some(_) => {
+                consecutive_empty += end - index;
+                if consecutive_empty >= SCAN_STOP_GAP {
+                    break;
+                }
+            }
+            None => {}
+        }
+
+        index = end;
     }
 
     let coins: Vec<Coin> = signer.list_coins().into_iter().map(|c| c.1).collect();

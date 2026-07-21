@@ -1,6 +1,7 @@
 pub mod utils;
 
-use crate::utils::{funded_wallet, generate, send_to_address, tcp_client};
+use crate::utils::{bootstrap_electrs, funded_wallet, generate, send_to_address, tcp_client};
+use joinstr::interface::list_coins;
 use joinstr::signer::{CoinPath, WpkhHotSigner};
 use miniscript::bitcoin::{Amount, Network};
 
@@ -81,6 +82,37 @@ fn batched_scan_finds_a_coin_past_the_first_batch() {
 
     assert_eq!(signer.get_coins_at_batch(&paths).unwrap(), 1);
     assert_eq!(signer.list_coins()[0].0, CoinPath::new(0, 15));
+}
+
+// list_coins stops after a gap of empty indexes, so a coin sitting past the gap
+// (here index 40, with index 0 funded and nothing between) is intentionally not
+// returned, the same tradeoff as a wallet stop gap. Drives the public entry
+// point end to end against regtest electrs.
+#[test]
+fn list_coins_stops_at_the_gap_limit() {
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    let m = "abandon abandon abandon abandon abandon abandon \
+             abandon abandon abandon abandon abandon about";
+    let signer = WpkhHotSigner::new_from_mnemonics(Network::Regtest, m).unwrap();
+    send_to_address(
+        &bitcoind,
+        &signer.address_at(&CoinPath::new(0, 0)).unwrap(),
+        Amount::from_btc(0.01).unwrap(),
+    );
+    send_to_address(
+        &bitcoind,
+        &signer.address_at(&CoinPath::new(0, 40)).unwrap(),
+        Amount::from_btc(0.02).unwrap(),
+    );
+    generate(&bitcoind, 2);
+
+    let coins = list_coins(m, url, port, (0, 100), Network::Regtest, None).unwrap();
+    assert_eq!(
+        coins.len(),
+        1,
+        "index 40 is past the gap and must be skipped"
+    );
+    assert_eq!(coins[0].txout.value, Amount::from_btc(0.01).unwrap());
 }
 
 #[test]
