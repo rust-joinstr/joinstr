@@ -74,6 +74,9 @@ typedef struct wire_cst_ffi_coinjoin_update {
   int32_t step;
   struct wire_cst_list_prim_u_8_strict *txid;
   struct wire_cst_list_prim_u_8_strict *error;
+  struct wire_cst_list_prim_u_8_strict *output_event_id;
+  struct wire_cst_list_prim_u_8_strict *input_event_id;
+  struct wire_cst_list_prim_u_8_strict *psbt;
 } wire_cst_ffi_coinjoin_update;
 
 typedef struct wire_cst_joinstr_error {

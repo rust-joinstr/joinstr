@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     electrum::Client,
-    joinstr::{Joinstr, Step},
+    joinstr::{CoinjoinProgress, Joinstr},
     nostr::{sync::NostrClient, Pool},
     signer::{Coin, CoinPath, WpkhHotSigner},
     utils::now,
@@ -259,7 +259,7 @@ pub fn initiate_coinjoin(config: PoolConfig, peer: PeerConfig) -> Result<Txid, E
 /// coinjoin runs on a worker thread while this polls the current step; polling
 /// (rather than the `notif` callback) avoids the deadlock that callback hits
 /// when it fires while the inner lock is held.
-pub fn initiate_coinjoin_with_progress<F: Fn(Step)>(
+pub fn initiate_coinjoin_with_progress<F: Fn(CoinjoinProgress)>(
     config: PoolConfig,
     peer: PeerConfig,
     on_step: F,
@@ -303,7 +303,7 @@ pub fn initiate_coinjoin_with_progress<F: Fn(Step)>(
 
 /// Runs `start_coinjoin_blocking` on a worker thread, polling the step and
 /// forwarding each change to `on_step`, and returns the final txid.
-fn run_coinjoin_with_progress<F: Fn(Step)>(
+fn run_coinjoin_with_progress<F: Fn(CoinjoinProgress)>(
     joinstr: Joinstr<'static>,
     signer: WpkhHotSigner,
     pool: Option<Pool>,
@@ -319,21 +319,23 @@ fn run_coinjoin_with_progress<F: Fn(Step)>(
             .compute_txid())
     });
 
-    let mut last: Option<Step> = None;
-    let mut report = |step: Step| {
-        if last != Some(step) {
-            on_step(step);
-            last = Some(step);
+    // Report on any change to the step or to the accumulated detail (event ids,
+    // psbt), so a detail that lands mid-step still reaches the caller promptly.
+    let mut last: Option<CoinjoinProgress> = None;
+    let mut report = |p: CoinjoinProgress| {
+        if last.as_ref() != Some(&p) {
+            on_step(p.clone());
+            last = Some(p);
         }
     };
 
     while !handle.is_finished() {
-        report(progress.current_step());
+        report(progress.current_progress());
         std::thread::sleep(Duration::from_millis(300));
     }
-    // Surface any step reached in the gap between the last poll and the thread
-    // finishing (e.g. Broadcast/Mined).
-    report(progress.current_step());
+    // Surface any progress reached in the gap between the last poll and the
+    // thread finishing (e.g. Broadcast/Mined).
+    report(progress.current_progress());
 
     handle.join().map_err(|_| Error::CoinjoinThreadPanicked)?
 }
@@ -410,7 +412,7 @@ pub fn join_coinjoin(pool: Pool, peer: PeerConfig) -> Result<String /* Txid */, 
 
 /// Like [`join_coinjoin`], but reports each coinjoin [`Step`] to `on_step` as it
 /// happens (see [`initiate_coinjoin_with_progress`]).
-pub fn join_coinjoin_with_progress<F: Fn(Step)>(
+pub fn join_coinjoin_with_progress<F: Fn(CoinjoinProgress)>(
     pool: Pool,
     peer: PeerConfig,
     on_step: F,

@@ -349,10 +349,16 @@ impl SseDecode for crate::api::types::FfiCoinjoinUpdate {
         let mut var_step = <crate::api::types::FfiCoinjoinStep>::sse_decode(deserializer);
         let mut var_txid = <Option<String>>::sse_decode(deserializer);
         let mut var_error = <Option<String>>::sse_decode(deserializer);
+        let mut var_outputEventId = <Option<String>>::sse_decode(deserializer);
+        let mut var_inputEventId = <Option<String>>::sse_decode(deserializer);
+        let mut var_psbt = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::FfiCoinjoinUpdate {
             step: var_step,
             txid: var_txid,
             error: var_error,
+            output_event_id: var_outputEventId,
+            input_event_id: var_inputEventId,
+            psbt: var_psbt,
         };
     }
 }
@@ -646,6 +652,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::FfiCoinjoinUpdate {
             self.step.into_into_dart().into_dart(),
             self.txid.into_into_dart().into_dart(),
             self.error.into_into_dart().into_dart(),
+            self.output_event_id.into_into_dart().into_dart(),
+            self.input_event_id.into_into_dart().into_dart(),
+            self.psbt.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -846,6 +855,9 @@ impl SseEncode for crate::api::types::FfiCoinjoinUpdate {
         <crate::api::types::FfiCoinjoinStep>::sse_encode(self.step, serializer);
         <Option<String>>::sse_encode(self.txid, serializer);
         <Option<String>>::sse_encode(self.error, serializer);
+        <Option<String>>::sse_encode(self.output_event_id, serializer);
+        <Option<String>>::sse_encode(self.input_event_id, serializer);
+        <Option<String>>::sse_encode(self.psbt, serializer);
     }
 }
 
@@ -1088,6 +1100,9 @@ mod io {
                 step: self.step.cst_decode(),
                 txid: self.txid.cst_decode(),
                 error: self.error.cst_decode(),
+                output_event_id: self.output_event_id.cst_decode(),
+                input_event_id: self.input_event_id.cst_decode(),
+                psbt: self.psbt.cst_decode(),
             }
         }
     }
@@ -1195,6 +1210,9 @@ mod io {
                 step: Default::default(),
                 txid: core::ptr::null_mut(),
                 error: core::ptr::null_mut(),
+                output_event_id: core::ptr::null_mut(),
+                input_event_id: core::ptr::null_mut(),
+                psbt: core::ptr::null_mut(),
             }
         }
     }
@@ -1402,6 +1420,9 @@ mod io {
         step: i32,
         txid: *mut wire_cst_list_prim_u_8_strict,
         error: *mut wire_cst_list_prim_u_8_strict,
+        output_event_id: *mut wire_cst_list_prim_u_8_strict,
+        input_event_id: *mut wire_cst_list_prim_u_8_strict,
+        psbt: *mut wire_cst_list_prim_u_8_strict,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]

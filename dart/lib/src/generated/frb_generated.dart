@@ -328,12 +328,15 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
   FfiCoinjoinUpdate dco_decode_ffi_coinjoin_update(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return FfiCoinjoinUpdate(
       step: dco_decode_ffi_coinjoin_step(arr[0]),
       txid: dco_decode_opt_String(arr[1]),
       error: dco_decode_opt_String(arr[2]),
+      outputEventId: dco_decode_opt_String(arr[3]),
+      inputEventId: dco_decode_opt_String(arr[4]),
+      psbt: dco_decode_opt_String(arr[5]),
     );
   }
 
@@ -555,7 +558,16 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
     var var_step = sse_decode_ffi_coinjoin_step(deserializer);
     var var_txid = sse_decode_opt_String(deserializer);
     var var_error = sse_decode_opt_String(deserializer);
-    return FfiCoinjoinUpdate(step: var_step, txid: var_txid, error: var_error);
+    var var_outputEventId = sse_decode_opt_String(deserializer);
+    var var_inputEventId = sse_decode_opt_String(deserializer);
+    var var_psbt = sse_decode_opt_String(deserializer);
+    return FfiCoinjoinUpdate(
+        step: var_step,
+        txid: var_txid,
+        error: var_error,
+        outputEventId: var_outputEventId,
+        inputEventId: var_inputEventId,
+        psbt: var_psbt);
   }
 
   @protected
@@ -854,6 +866,9 @@ class joinstrApiImpl extends joinstrApiImplPlatform implements joinstrApi {
     sse_encode_ffi_coinjoin_step(self.step, serializer);
     sse_encode_opt_String(self.txid, serializer);
     sse_encode_opt_String(self.error, serializer);
+    sse_encode_opt_String(self.outputEventId, serializer);
+    sse_encode_opt_String(self.inputEventId, serializer);
+    sse_encode_opt_String(self.psbt, serializer);
   }
 
   @protected

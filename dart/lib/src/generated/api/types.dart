@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `done`, `failed`, `from_pool`, `native_network`, `step`
+// These functions are ignored because they are not marked as `pub`: `done`, `failed`, `from_pool`, `native_network`, `progress`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `try_from`, `try_from`
 
 enum BitcoinNetwork {
@@ -86,14 +86,32 @@ class FfiCoinjoinUpdate {
   final String? txid;
   final String? error;
 
+  /// Relay event id acknowledging this peer's output registration.
+  final String? outputEventId;
+
+  /// Relay event id acknowledging this peer's input registration.
+  final String? inputEventId;
+
+  /// The finalized coinjoin psbt (base64), set once the input is signed.
+  final String? psbt;
+
   const FfiCoinjoinUpdate({
     required this.step,
     this.txid,
     this.error,
+    this.outputEventId,
+    this.inputEventId,
+    this.psbt,
   });
 
   @override
-  int get hashCode => step.hashCode ^ txid.hashCode ^ error.hashCode;
+  int get hashCode =>
+      step.hashCode ^
+      txid.hashCode ^
+      error.hashCode ^
+      outputEventId.hashCode ^
+      inputEventId.hashCode ^
+      psbt.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -102,7 +120,10 @@ class FfiCoinjoinUpdate {
           runtimeType == other.runtimeType &&
           step == other.step &&
           txid == other.txid &&
-          error == other.error;
+          error == other.error &&
+          outputEventId == other.outputEventId &&
+          inputEventId == other.inputEventId &&
+          psbt == other.psbt;
 }
 
 /// A single peer's coinjoin parameters.

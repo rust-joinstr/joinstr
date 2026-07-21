@@ -80,8 +80,8 @@ pub fn initiate_coinjoin(
 ) -> Result<(), JoinstrError> {
     let pool_config = config.into();
     let peer_config = peer.try_into()?;
-    let on_step = |step| {
-        let _ = progress.add(FfiCoinjoinUpdate::step(step));
+    let on_step = |p| {
+        let _ = progress.add(FfiCoinjoinUpdate::progress(p));
     };
     match interface::initiate_coinjoin_with_progress(pool_config, peer_config, on_step) {
         Ok(txid) => {
@@ -108,8 +108,8 @@ pub fn join_coinjoin(
     pool.network = peer.native_network();
 
     let peer_config = peer.try_into()?;
-    let on_step = |step| {
-        let _ = progress.add(FfiCoinjoinUpdate::step(step));
+    let on_step = |p| {
+        let _ = progress.add(FfiCoinjoinUpdate::progress(p));
     };
     match interface::join_coinjoin_with_progress(pool, peer_config, on_step) {
         Ok(txid) => {

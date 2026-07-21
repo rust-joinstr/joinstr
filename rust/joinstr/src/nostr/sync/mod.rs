@@ -1,11 +1,14 @@
-use std::{fmt::Debug, str::FromStr};
+use std::{fmt::Debug, str::FromStr, time::Duration};
 
-use simple_nostr_client::nostr::event::{Event, EventBuilder};
+use simple_nostr_client::nostr::event::{Event, EventBuilder, EventId};
 use simple_nostr_client::nostr::key::PublicKey;
 use simple_nostr_client::nostr::Keys;
 use simple_nostr_client::{WsClient, WsClientBuilder};
 
 use crate::nostr::{error::Error, Pool, PoolMessage};
+
+/// How long to wait for a relay to `OK` a registration event before giving up.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct NostrClient {
@@ -180,6 +183,30 @@ impl NostrClient {
         let clear_content = msg.to_string()?;
         log::debug!("NostrClient.send_pool_message(): {:#?}", clear_content);
         self.send_dm(npub, clear_content)
+    }
+
+    /// Send a pool message over a brand new connection (a fresh SOCKS isolation
+    /// token, hence a fresh Tor circuit), wait for the relay `OK`, and return the
+    /// event id. Used for output and input registration so the two are posted
+    /// from different exit IPs (unlinkable) and neither is silently dropped. This
+    /// instance keeps its own connection for receiving; the throwaway one is used
+    /// only to publish, then closed.
+    pub fn send_pool_message_isolated(
+        &self,
+        npub: &PublicKey,
+        msg: PoolMessage,
+        proxy: Option<String>,
+    ) -> Result<EventId, Error> {
+        let relay = self.get_relay().ok_or(Error::NotConnected)?;
+        let keys = self.get_keys()?.clone();
+        let content = msg.to_string()?;
+        let mut fresh = WsClient::new()
+            .relay(relay)
+            .proxy(proxy)
+            .keys(keys)
+            .connect()?;
+        let id = fresh.send_dm_confirmed(content, npub, CONFIRM_TIMEOUT)?;
+        Ok(id)
     }
 
     /// Subscribe to notifications of NIP04 DMs thatare send tu the client pubkey

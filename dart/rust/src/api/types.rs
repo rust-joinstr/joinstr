@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use joinstr::bip39::Mnemonic;
 use joinstr::interface::{PeerConfig, PoolConfig};
-use joinstr::joinstr::Step;
+use joinstr::joinstr::{CoinjoinProgress, Step};
 use joinstr::miniscript::bitcoin::{
     Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TxOut, Txid,
 };
@@ -271,6 +271,12 @@ pub struct FfiCoinjoinUpdate {
     pub step: FfiCoinjoinStep,
     pub txid: Option<String>,
     pub error: Option<String>,
+    /// Relay event id acknowledging this peer's output registration.
+    pub output_event_id: Option<String>,
+    /// Relay event id acknowledging this peer's input registration.
+    pub input_event_id: Option<String>,
+    /// The finalized coinjoin psbt (base64), set once the input is signed.
+    pub psbt: Option<String>,
 }
 
 /// The coinjoin steps worth showing in a timeline. `Done`/`Failed` are the two
@@ -303,11 +309,14 @@ impl From<Step> for FfiCoinjoinStep {
 }
 
 impl FfiCoinjoinUpdate {
-    pub(crate) fn step(step: Step) -> Self {
+    pub(crate) fn progress(p: CoinjoinProgress) -> Self {
         FfiCoinjoinUpdate {
-            step: FfiCoinjoinStep::from(step),
+            step: FfiCoinjoinStep::from(p.step),
             txid: None,
             error: None,
+            output_event_id: p.output_event_id,
+            input_event_id: p.input_event_id,
+            psbt: p.psbt,
         }
     }
 
@@ -316,6 +325,9 @@ impl FfiCoinjoinUpdate {
             step: FfiCoinjoinStep::Done,
             txid: Some(txid),
             error: None,
+            output_event_id: None,
+            input_event_id: None,
+            psbt: None,
         }
     }
 
@@ -324,6 +336,9 @@ impl FfiCoinjoinUpdate {
             step: FfiCoinjoinStep::Failed,
             txid: None,
             error: Some(message),
+            output_event_id: None,
+            input_event_id: None,
+            psbt: None,
         }
     }
 }

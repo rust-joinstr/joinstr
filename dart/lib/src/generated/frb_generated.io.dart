@@ -316,6 +316,9 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
     wireObj.step = cst_encode_ffi_coinjoin_step(apiObj.step);
     wireObj.txid = cst_encode_opt_String(apiObj.txid);
     wireObj.error = cst_encode_opt_String(apiObj.error);
+    wireObj.output_event_id = cst_encode_opt_String(apiObj.outputEventId);
+    wireObj.input_event_id = cst_encode_opt_String(apiObj.inputEventId);
+    wireObj.psbt = cst_encode_opt_String(apiObj.psbt);
   }
 
   @protected
@@ -866,6 +869,12 @@ final class wire_cst_ffi_coinjoin_update extends ffi.Struct {
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> txid;
 
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> error;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> output_event_id;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> input_event_id;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> psbt;
 }
 
 final class wire_cst_joinstr_error extends ffi.Struct {

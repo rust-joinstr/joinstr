@@ -68,6 +68,16 @@ pub struct Status {
     error: Option<String>,
 }
 
+/// A snapshot of coinjoin progress: the current [`Step`] plus the timeline
+/// detail known so far. Detail fields stay `None` until their step is reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoinjoinProgress {
+    pub step: Step,
+    pub output_event_id: Option<String>,
+    pub input_event_id: Option<String>,
+    pub psbt: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct JoinstrInner<'a> {
     role: Role,
@@ -95,6 +105,11 @@ pub struct JoinstrInner<'a> {
     peers: Vec<nostr::PublicKey>,
     outputs: Vec<miniscript::bitcoin::Address>,
     inputs: Vec<InputDataSigned>,
+    // Timeline detail surfaced to the caller: the relay event ids acknowledging
+    // this peer's own output and input registrations, and the finalized psbt.
+    output_event_id: Option<String>,
+    input_event_id: Option<String>,
+    psbt_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +160,9 @@ impl Default for JoinstrInner<'_> {
             peers: Default::default(),
             outputs: Default::default(),
             inputs: Default::default(),
+            output_event_id: None,
+            input_event_id: None,
+            psbt_base64: None,
         }
     }
 }
@@ -869,6 +887,19 @@ impl Joinstr<'_> {
         self.inner.lock().expect("poisoned").step
     }
 
+    /// The current step plus the timeline detail captured so far: the relay
+    /// event ids that acknowledged this peer's output and input registrations,
+    /// and the finalized psbt. Polled by the progress reporter.
+    pub fn current_progress(&self) -> CoinjoinProgress {
+        let inner = self.inner.lock().expect("poisoned");
+        CoinjoinProgress {
+            step: inner.step,
+            output_event_id: inner.output_event_id.clone(),
+            input_event_id: inner.input_event_id.clone(),
+            psbt: inner.psbt_base64.clone(),
+        }
+    }
+
     /// Returns the current serializable state of the [`Joinstr`] instance.
     ///
     /// # Returns
@@ -1446,7 +1477,12 @@ impl<'a> JoinstrInner<'a> {
             let msg = PoolMessage::Output(address.as_unchecked().clone());
             self.pool_exists()?;
             let npub = self.pool_as_ref()?.public_key;
-            self.client.send_pool_message(&npub, msg)?;
+            // Publish the output over its own fresh circuit and wait for the
+            // relay OK; store the acknowledging event id for the timeline.
+            let event_id =
+                self.client
+                    .send_pool_message_isolated(&npub, msg, self.proxy.clone())?;
+            self.output_event_id = Some(event_id.to_string());
             self.outputs.push(address.clone());
             notif();
             // TODO: handle re-send if fails
@@ -1546,11 +1582,17 @@ impl<'a> JoinstrInner<'a> {
                 ..Default::default()
             };
 
+            self.psbt_base64 = Some(psbt.to_string());
             let msg = PoolMessage::Psbt(psbt);
             self.pool_exists()?;
             let npub = self.pool_as_ref()?.public_key;
             log::debug!("Joinstr::register_input({name}) sending signed PSBT to pool..");
-            self.client.send_pool_message(&npub, msg)?;
+            // Publish the input over its own fresh circuit (a different exit IP
+            // than the output) and wait for the relay OK.
+            let event_id =
+                self.client
+                    .send_pool_message_isolated(&npub, msg, self.proxy.clone())?;
+            self.input_event_id = Some(event_id.to_string());
             self.inputs.push(signed_input);
             notif();
             log::debug!("Joinstr::register_input({name}) input sent & locally registered!");
