@@ -1002,6 +1002,11 @@ impl Joinstr<'_> {
 
         rand_delay();
 
+        // Register the input from a fresh tor circuit so the relay sees a
+        // different exit IP than the one that registered this peer's output,
+        // keeping the two unlinkable.
+        self.inner.lock().expect("poisoned").rotate_circuit()?;
+
         let mut inner = self.inner.lock().expect("poisoned");
         if inner.input.is_some() {
             if let Some(s) = signer {
@@ -1194,6 +1199,10 @@ impl Joinstr<'_> {
                 notif();
 
                 rand_delay();
+
+                // Fresh circuit for input registration, so the input is not
+                // linkable to the output by exit IP.
+                j.inner.lock().expect("poisoned").rotate_circuit()?;
 
                 let mut inner = j.inner.lock().expect("poisoned");
                 if inner.input.is_some() {
@@ -1437,6 +1446,27 @@ impl<'a> JoinstrInner<'a> {
     ///   - the pool not exists
     ///   - [`Joinstr::output`] is missing
     ///   - fails to send the nostr message
+    // Reconnect to the relay over a fresh tor circuit, keeping the same pool
+    // keys and re-subscribing. Called between output and input registration so a
+    // peer posts its input from a different exit IP than its output; sharing a
+    // circuit would let the relay link the two and defeat the coinjoin. A fresh
+    // NostrClient opens a new SOCKS connection with a new isolation token, which
+    // Tor maps to a new circuit. connect_nostr re-subscribes to the pool DMs
+    // with no since bound, so every message already posted (peers' inputs
+    // included) is refetched and nothing is missed.
+    fn rotate_circuit(&mut self) -> Result<(), Error> {
+        let keys = self.client.get_keys()?.clone();
+        let relay = self.client.get_relay().ok_or(Error::RelaysMissing)?;
+        let name = format!("rot_{}", self.client.name);
+        let mut rotated = NostrClient::new(&name)
+            .relay(relay)?
+            .proxy(self.proxy.clone())?
+            .keys(keys)?;
+        rotated.connect_nostr()?;
+        self.client = rotated;
+        Ok(())
+    }
+
     fn register_output<N>(&mut self, notif: N) -> Result<(), Error>
     where
         N: Fn(),
