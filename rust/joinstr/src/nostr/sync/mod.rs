@@ -10,6 +10,10 @@ use crate::nostr::{error::Error, Pool, PoolMessage};
 /// How long to wait for a relay to `OK` a registration event before giving up.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How many times to (re)build a fresh circuit and try an isolated send before
+/// giving up. Each attempt is a different tor circuit.
+const ISOLATED_SEND_ATTEMPTS: usize = 3;
+
 #[derive(Default)]
 pub struct NostrClient {
     client: Option<WsClient>,
@@ -200,13 +204,31 @@ impl NostrClient {
         let relay = self.get_relay().ok_or(Error::NotConnected)?;
         let keys = self.get_keys()?.clone();
         let content = msg.to_string()?;
-        let mut fresh = WsClient::new()
-            .relay(relay)
-            .proxy(proxy)
-            .keys(keys)
-            .connect()?;
-        let id = fresh.send_dm_confirmed(content, npub, CONFIRM_TIMEOUT)?;
-        Ok(id)
+
+        // Each attempt opens a new connection, which draws a new SOCKS isolation
+        // token and therefore a different tor circuit. Building a fresh circuit
+        // occasionally overshoots the connect budget or picks a dead relay; a
+        // retry routes around it on another circuit instead of failing the round.
+        let mut last_err = None;
+        for attempt in 0..ISOLATED_SEND_ATTEMPTS {
+            let result = WsClient::new()
+                .relay(relay.clone())
+                .proxy(proxy.clone())
+                .keys(keys.clone())
+                .connect()
+                .and_then(|mut c| c.send_dm_confirmed(content.clone(), npub, CONFIRM_TIMEOUT));
+            match result {
+                Ok(id) => return Ok(id),
+                Err(e) => {
+                    log::warn!("send_pool_message_isolated attempt {attempt} failed: {e:?}");
+                    last_err = Some(e);
+                    if attempt + 1 < ISOLATED_SEND_ATTEMPTS {
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("at least one attempt").into())
     }
 
     /// Subscribe to notifications of NIP04 DMs thatare send tu the client pubkey
