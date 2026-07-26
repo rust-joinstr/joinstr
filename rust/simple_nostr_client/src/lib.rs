@@ -27,16 +27,11 @@ pub use tungstenite;
 
 const PING_INTERVAL: u64 = 5; // ping interval in seconds
 
-/// Bound the TCP connect and the TLS + WebSocket handshake so a pool-supplied
-/// relay that accepts the connection and then stalls cannot wedge `connect()`
-/// forever. `set_nonblocking` supersedes these once the handshake completes.
-///
-/// The connect budget is generous because over tor the SOCKS `CONNECT` only
-/// returns once a fresh circuit is built, which was measured to spike past 12s;
-/// on a phone's embedded tor it is slower still. A 10s cap surfaced as
-/// "socks5 connect failed" mid-coinjoin.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+// Bound the TCP connect and the TLS + WebSocket handshake so a pool-supplied
+// relay that accepts the connection and then stalls cannot wedge `connect()`
+// forever. `set_nonblocking` supersedes these once the handshake completes.
+// Shared with the electrum clients so every tor path uses one budget.
+use socks5::{CONNECT_TIMEOUT, HANDSHAKE_TIMEOUT};
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 

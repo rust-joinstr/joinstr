@@ -8,9 +8,9 @@ use std::{
 
 type TcpStream = Arc<Mutex<net::TcpStream>>;
 
-/// Bounds the proxy handshake so a wedged Tor cannot hang the connect. Only
-/// used on the proxied path; the direct path keeps its prior blocking connect.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// Bounds the proxy handshake so a wedged Tor cannot hang the connect. Only used
+// on the proxied path; the direct path keeps its prior blocking connect.
+use socks5::CONNECT_TIMEOUT;
 
 #[derive(Debug)]
 pub struct TcpClient {
