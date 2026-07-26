@@ -233,13 +233,16 @@ pub fn list_coins(
         index = end;
     }
 
-    let coins: Vec<Coin> = signer.list_coins().into_iter().map(|c| c.1).collect();
-
-    if coins.is_empty() {
-        if let Some(e) = first_error {
-            return Err(e.into());
-        }
+    // Any batch that exhausted its retries leaves a stretch of the range
+    // unscanned. Report that even when other batches found coins: returning a
+    // silently partial set would have the caller choose an input from an
+    // incomplete view of the wallet, and hide spendable funds with no way to
+    // tell an empty wallet from a half-failed scan.
+    if let Some(e) = first_error {
+        return Err(e.into());
     }
+
+    let coins: Vec<Coin> = signer.list_coins().into_iter().map(|c| c.1).collect();
 
     Ok(coins)
 }
