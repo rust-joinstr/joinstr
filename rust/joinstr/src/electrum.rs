@@ -24,9 +24,19 @@ use std::{
 
 use crate::coinjoin::BitcoinBackend;
 
-/// How long a batched request waits for every id to be answered before giving
-/// up. `recv` has no read timeout of its own, so this is what stops a server
-/// that answers only part of a batch from hanging the caller forever.
+/// Socket read timeout for every electrum request.
+///
+/// Without this a server that sends a partial reply and then holds the socket
+/// open parks `read_line` in a blocking `read()` forever: wall-clock deadlines
+/// like [`BATCH_TIMEOUT`] are only evaluated *between* completed reads, so they
+/// can never fire. Generous, because these are single request/response round
+/// trips over tor (a coinjoin's long waits are on the nostr side, not here);
+/// hitting it surfaces as a retryable error, so `with_reconnect` rebuilds the
+/// circuit rather than failing the round.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wall-clock bound on collecting every reply of a batched request. Works in
+/// concert with [`READ_TIMEOUT`], which is what actually lets `recv` return.
 const BATCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
@@ -197,6 +207,9 @@ impl Clone for Client {
             .proxy(self.proxy.clone())
             .verif_certificate(self.verify_certificate);
         inner.try_connect().expect("electrum reconnect on clone");
+        inner
+            .set_read_timeout(Some(READ_TIMEOUT))
+            .expect("electrum read timeout on clone");
         Client {
             inner,
             index: HashMap::new(),
@@ -233,6 +246,7 @@ impl Client {
         let address = address.to_string().replace("ssl://", "");
         let mut inner = RawClient::new_ssl_maybe(&address, port, ssl).proxy(proxy.clone());
         inner.try_connect()?;
+        inner.set_read_timeout(Some(READ_TIMEOUT))?;
         Ok(Client {
             inner,
             index: HashMap::new(),
@@ -253,6 +267,7 @@ impl Client {
             .proxy(self.proxy.clone())
             .verif_certificate(self.verify_certificate);
         inner.try_connect()?;
+        inner.set_read_timeout(Some(READ_TIMEOUT))?;
         self.inner = inner;
         self.index.clear();
         Ok(())
@@ -286,6 +301,7 @@ impl Client {
         let address = address.to_string().replace("ssl://", "");
         let mut inner = RawClient::new_ssl_maybe(&address, port, ssl).verif_certificate(false);
         inner.try_connect()?;
+        inner.set_read_timeout(Some(READ_TIMEOUT))?;
         Ok(Client {
             inner,
             index: HashMap::new(),
