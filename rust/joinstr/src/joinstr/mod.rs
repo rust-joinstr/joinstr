@@ -68,6 +68,37 @@ pub struct Status {
     error: Option<String>,
 }
 
+/// Everything needed to publish one registration, captured while the inner lock
+/// is held so the send itself can run without it. Publishing opens a fresh
+/// connection per attempt and can take minutes; holding the lock across it would
+/// block the progress poller and, on a panic, poison the mutex.
+struct PendingSend {
+    npub: nostr::PublicKey,
+    msg: PoolMessage,
+    relay: String,
+    keys: Keys,
+    proxy: Option<String>,
+}
+
+impl PendingSend {
+    fn send(self) -> Result<String, Error> {
+        let id = NostrClient::send_pool_message_detached(
+            self.relay, self.keys, self.proxy, &self.npub, self.msg,
+        )?;
+        Ok(id.to_string())
+    }
+}
+
+/// A snapshot of coinjoin progress: the current [`Step`] plus the timeline
+/// detail known so far. Detail fields stay `None` until their step is reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoinjoinProgress {
+    pub step: Step,
+    pub output_event_id: Option<String>,
+    pub input_event_id: Option<String>,
+    pub psbt: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct JoinstrInner<'a> {
     role: Role,
@@ -95,6 +126,11 @@ pub struct JoinstrInner<'a> {
     peers: Vec<nostr::PublicKey>,
     outputs: Vec<miniscript::bitcoin::Address>,
     inputs: Vec<InputDataSigned>,
+    // Timeline detail surfaced to the caller: the relay event ids acknowledging
+    // this peer's own output and input registrations, and the finalized psbt.
+    output_event_id: Option<String>,
+    input_event_id: Option<String>,
+    psbt_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +181,9 @@ impl Default for JoinstrInner<'_> {
             peers: Default::default(),
             outputs: Default::default(),
             inputs: Default::default(),
+            output_event_id: None,
+            input_event_id: None,
+            psbt_base64: None,
         }
     }
 }
@@ -683,12 +722,13 @@ impl Joinstr<'_> {
 
         rand_delay();
 
-        let mut inner = self.inner.lock().expect("poisoned");
-        if let Some(output) = inner.output.as_ref() {
-            coinjoin.add_output(output.clone());
-            inner.register_output(&notif)?;
+        let has_output = self.inner.lock().expect("poisoned").output.is_some();
+        if has_output {
+            // Publishes without holding the inner lock, so the progress poller
+            // keeps running during the send.
+            let address = self.register_output_unlocked(&notif)?;
+            coinjoin.add_output(address);
         }
-        drop(inner);
 
         let mut backoff = Backoff::new_us(WAIT);
 
@@ -861,6 +901,72 @@ impl Joinstr<'_> {
         self.inner.lock().expect("poisoned").status()
     }
 
+    /// The coinjoin step this instance is currently on. Cheap and lock-scoped
+    /// so it can be polled from another thread while `start_coinjoin_blocking`
+    /// runs, without the deadlock a `notif` callback would hit (that callback
+    /// is sometimes invoked while the inner lock is held).
+    pub fn current_step(&self) -> Step {
+        // Recover from poisoning rather than panicking: this runs on the
+        // progress-polling thread, and a panic in the coinjoin worker must
+        // surface as CoinjoinThreadPanicked from its join handle, not take the
+        // poller down with it.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).step
+    }
+
+    /// Publish this peer's output, holding the inner lock only to prepare and to
+    /// record the result. Returns the registered address.
+    fn register_output_unlocked<N>(&self, notif: N) -> Result<Address, Error>
+    where
+        N: Fn(),
+    {
+        let (address, pending) = {
+            let inner = self.inner.lock().expect("poisoned");
+            inner.prepare_output()?
+        };
+        // Lock released: publishing can take minutes.
+        let event_id = pending.send()?;
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .commit_output(address.clone(), event_id);
+        notif();
+        Ok(address)
+    }
+
+    /// Publish this peer's signed input, holding the inner lock only to sign and
+    /// prepare, then to record the result.
+    fn register_input_unlocked<S, N>(&self, signer: &S, notif: N) -> Result<(), Error>
+    where
+        S: JoinstrSigner,
+        N: Fn(),
+    {
+        let (signed_input, psbt, pending) = {
+            let inner = self.inner.lock().expect("poisoned");
+            inner.prepare_input(signer)?
+        };
+        // Lock released: publishing can take minutes.
+        let event_id = pending.send()?;
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .commit_input(signed_input, psbt, event_id);
+        notif();
+        Ok(())
+    }
+
+    /// The current step plus the timeline detail captured so far: the relay
+    /// event ids that acknowledged this peer's output and input registrations,
+    /// and the finalized psbt. Polled by the progress reporter.
+    pub fn current_progress(&self) -> CoinjoinProgress {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        CoinjoinProgress {
+            step: inner.step,
+            output_event_id: inner.output_event_id.clone(),
+            input_event_id: inner.input_event_id.clone(),
+            psbt: inner.psbt_base64.clone(),
+        }
+    }
+
     /// Returns the current serializable state of the [`Joinstr`] instance.
     ///
     /// # Returns
@@ -994,18 +1100,17 @@ impl Joinstr<'_> {
 
         rand_delay();
 
-        let mut inner = self.inner.lock().expect("poisoned");
-        if inner.input.is_some() {
+        let has_input = self.inner.lock().expect("poisoned").input.is_some();
+        if has_input {
             if let Some(s) = signer {
                 log::debug!("Joinstr::start_coinjoin_blocking({name}) try register input....");
-                inner.register_input(&s, &notif)?;
+                self.register_input_unlocked(&s, &notif)?;
                 log::debug!("Joinstr::start_coinjoin_blocking({name}) input registered!");
             } else {
                 log::debug!("Joinstr::start_coinjoin_blocking({name}) no input to register!");
                 return Err(Error::SignerMissing);
             }
         }
-        drop(inner);
 
         log::debug!(
             "Joinstr::start_coinjoin_blocking({name}) start registering external inputs..."
@@ -1187,11 +1292,10 @@ impl Joinstr<'_> {
 
                 rand_delay();
 
-                let mut inner = j.inner.lock().expect("poisoned");
-                if inner.input.is_some() {
-                    inner.register_input(&signer, &notif)?;
+                let has_input = j.inner.lock().expect("poisoned").input.is_some();
+                if has_input {
+                    j.register_input_unlocked(&signer, &notif)?;
                 }
-                drop(inner);
 
                 j.register_inputs(&notif)?;
 
@@ -1418,34 +1522,32 @@ impl<'a> JoinstrInner<'a> {
         })
     }
 
-    /// Register [`Joinstr::output`] address to the pool
-    ///
-    /// # Arguments
-    /// * `notif` - A callback function called every time the pool state is updated.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    ///   - the pool not exists
-    ///   - [`Joinstr::output`] is missing
-    ///   - fails to send the nostr message
-    fn register_output<N>(&mut self, notif: N) -> Result<(), Error>
-    where
-        N: Fn(),
-    {
-        if let Some(address) = &self.output {
-            // let msg = PoolMessage::Outputs(Outputs::single(address.as_unchecked().clone()));
-            let msg = PoolMessage::Output(address.as_unchecked().clone());
-            self.pool_exists()?;
-            let npub = self.pool_as_ref()?.public_key;
-            self.client.send_pool_message(&npub, msg)?;
-            self.outputs.push(address.clone());
-            notif();
-            // TODO: handle re-send if fails
-            Ok(())
-        } else {
-            Err(Error::OutputMissing)
-        }
+    /// Capture what publishing the output needs, so the caller can drop the lock
+    /// before the send. See [`PendingSend`].
+    fn prepare_output(&self) -> Result<(Address, PendingSend), Error> {
+        let address = self.output.clone().ok_or(Error::OutputMissing)?;
+        self.pool_exists()?;
+        let npub = self.pool_as_ref()?.public_key;
+        let msg = PoolMessage::Output(address.as_unchecked().clone());
+        Ok((address, self.pending_send(npub, msg)?))
+    }
+
+    /// Record a confirmed output registration.
+    fn commit_output(&mut self, address: Address, event_id: String) {
+        self.output_event_id = Some(event_id);
+        self.outputs.push(address);
+    }
+
+    /// Everything [`NostrClient::send_pool_message_detached`] needs, taken by
+    /// value while the lock is held.
+    fn pending_send(&self, npub: nostr::PublicKey, msg: PoolMessage) -> Result<PendingSend, Error> {
+        Ok(PendingSend {
+            npub,
+            msg,
+            relay: self.client.get_relay().ok_or(Error::RelaysMissing)?,
+            keys: self.client.get_keys()?.clone(),
+            proxy: self.proxy.clone(),
+        })
     }
 
     /// Try to register a received output address to the inner [`CoinJoin`]
@@ -1483,73 +1585,63 @@ impl<'a> JoinstrInner<'a> {
         Ok(())
     }
 
-    /// Try to sign / register / send our input.
-    ///
-    /// # Arguments
-    /// * `notif` - A callback function called every time the pool state is updated.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    ///   - the inner coinjoin is missing
-    ///   - the unsigned transaction has not been processed
-    ///   - signing the input fails
-    ///   - the inner pool dont exists
-    ///   - [`Joinstr::input`] is None
-    ///   - sending the input fails
-    fn register_input<S, N>(&mut self, signer: &S, notif: N) -> Result<(), Error>
+    /// Sign the input and capture what publishing it needs, without consuming
+    /// [`JoinstrInner::input`]: it is only cleared once the send is confirmed,
+    /// so a failed send leaves the round able to retry or resume.
+    fn prepare_input<S>(&self, signer: &S) -> Result<(InputDataSigned, String, PendingSend), Error>
     where
         S: JoinstrSigner,
-        N: Fn(),
     {
-        let name = self.client.name.clone();
+        let name = &self.client.name;
         log::debug!("Joinstr::register_input({name})");
         let unsigned = match self.coinjoin_as_ref()?.unsigned_tx() {
             Some(u) => u,
             None => return Err(Error::UnsignedTxNotExists),
         };
-        if let Some(input) = self.input.take() {
-            log::debug!("Joinstr::register_input({name}) signing input ...");
-            let signed_input = signer
-                .sign_input(&unsigned, input.clone())
-                .map_err(Error::SigningFail)?;
-            log::debug!("Joinstr::register_input({name}) input signed!");
+        let input = self.input.clone().ok_or(Error::InputMissing)?;
 
-            use miniscript::bitcoin::{Psbt, Transaction, TxIn};
+        log::debug!("Joinstr::register_input({name}) signing input ...");
+        let signed_input = signer
+            .sign_input(&unsigned, input.clone())
+            .map_err(Error::SigningFail)?;
+        log::debug!("Joinstr::register_input({name}) input signed!");
 
-            let mut psbt = Psbt::from_unsigned_tx(Transaction {
-                version: unsigned.version,
-                lock_time: unsigned.lock_time,
-                input: vec![TxIn {
-                    previous_output: signed_input.txin.previous_output,
-                    sequence: signed_input.txin.sequence,
-                    ..Default::default()
-                }],
-                output: unsigned.output.clone(),
-            })
-            .map_err(|_| Error::Coinjoin(crate::coinjoin::Error::TxToPsbt))?;
+        use miniscript::bitcoin::{Psbt, Transaction, TxIn};
 
-            use miniscript::bitcoin::psbt;
-            psbt.inputs[0] = psbt::Input {
-                witness_utxo: Some(input.txout.clone()),
-                // 0x81 = SIGHASH_ALL | SIGHASH_ANYONECANPAY, required by the JoinStr protocol
-                sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)),
-                final_script_witness: Some(signed_input.txin.witness.clone()),
+        let mut psbt = Psbt::from_unsigned_tx(Transaction {
+            version: unsigned.version,
+            lock_time: unsigned.lock_time,
+            input: vec![TxIn {
+                previous_output: signed_input.txin.previous_output,
+                sequence: signed_input.txin.sequence,
                 ..Default::default()
-            };
+            }],
+            output: unsigned.output.clone(),
+        })
+        .map_err(|_| Error::Coinjoin(crate::coinjoin::Error::TxToPsbt))?;
 
-            let msg = PoolMessage::Psbt(psbt);
-            self.pool_exists()?;
-            let npub = self.pool_as_ref()?.public_key;
-            log::debug!("Joinstr::register_input({name}) sending signed PSBT to pool..");
-            self.client.send_pool_message(&npub, msg)?;
-            self.inputs.push(signed_input);
-            notif();
-            log::debug!("Joinstr::register_input({name}) input sent & locally registered!");
-            Ok(())
-        } else {
-            Err(Error::InputMissing)
-        }
+        use miniscript::bitcoin::psbt;
+        psbt.inputs[0] = psbt::Input {
+            witness_utxo: Some(input.txout.clone()),
+            // 0x81 = SIGHASH_ALL | SIGHASH_ANYONECANPAY, required by the JoinStr protocol
+            sighash_type: Some(psbt::PsbtSighashType::from_u32(0x81)),
+            final_script_witness: Some(signed_input.txin.witness.clone()),
+            ..Default::default()
+        };
+
+        let psbt_base64 = psbt.to_string();
+        self.pool_exists()?;
+        let npub = self.pool_as_ref()?.public_key;
+        let pending = self.pending_send(npub, PoolMessage::Psbt(psbt))?;
+        Ok((signed_input, psbt_base64, pending))
+    }
+
+    /// Record a confirmed input registration, consuming the input only now.
+    fn commit_input(&mut self, signed_input: InputDataSigned, psbt: String, event_id: String) {
+        self.psbt_base64 = Some(psbt);
+        self.input_event_id = Some(event_id);
+        self.input = None;
+        self.inputs.push(signed_input);
     }
 
     /// Try to register a received signed input to the inner [`CoinJoin`]

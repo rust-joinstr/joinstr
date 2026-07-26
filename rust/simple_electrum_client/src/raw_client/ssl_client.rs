@@ -9,12 +9,11 @@ use std::{
 type TlsStream = rustls::StreamOwned<rustls::ClientConnection, net::TcpStream>;
 type SharedStream = Arc<Mutex<TlsStream>>;
 
-/// Bound the TCP connect and the TLS handshake so a server that accepts the
-/// connection and then stalls cannot hang `try_connect` (and thus
-/// `Client::new`) forever. Superseded by the caller's own timeouts once the
-/// handshake completes.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+// Bound the TCP connect and the TLS handshake so a server that accepts the
+// connection and then stalls cannot hang `try_connect` (and thus `Client::new`)
+// forever. Superseded by the caller's own timeouts once the handshake
+// completes. Shared so every tor path uses one budget.
+use socks5::{CONNECT_TIMEOUT, HANDSHAKE_TIMEOUT};
 
 /// Verifying rustls config (bundled Mozilla roots, `ring` provider), built once
 /// and shared: joinstr opens one connection per pool, so rebuilding the root

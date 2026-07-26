@@ -6,12 +6,12 @@ use std::{
         mpsc::{self, Receiver, Sender},
         Arc, LazyLock,
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use backoff::Backoff;
 use nostr::{
-    event::{Event, EventBuilder, Kind, Tag},
+    event::{Event, EventBuilder, EventId, Kind, Tag},
     key::{Keys, PublicKey},
     message::{ClientMessage, RawRelayMessage, RelayMessage, SubscriptionId},
     nips::nip04,
@@ -27,11 +27,11 @@ pub use tungstenite;
 
 const PING_INTERVAL: u64 = 5; // ping interval in seconds
 
-/// Bound the TCP connect and the TLS + WebSocket handshake so a pool-supplied
-/// relay that accepts the connection and then stalls cannot wedge `connect()`
-/// forever. `set_nonblocking` supersedes these once the handshake completes.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+// Bound the TCP connect and the TLS + WebSocket handshake so a pool-supplied
+// relay that accepts the connection and then stalls cannot wedge `connect()`
+// forever. `set_nonblocking` supersedes these once the handshake completes.
+// Shared with the electrum clients so every tor path uses one budget.
+use socks5::{CONNECT_TIMEOUT, HANDSHAKE_TIMEOUT};
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -54,6 +54,10 @@ pub enum Error {
     ConnectionClosed,
     RawRelayMessage,
     RelayMessage,
+    /// The relay did not acknowledge the event with an `OK` before the deadline.
+    OkTimeout,
+    /// The relay rejected the event (`OK` with `false`); carries its message.
+    EventRejected(String),
 }
 
 impl From<tungstenite::Error> for Error {
@@ -357,6 +361,77 @@ impl WsClient {
             vec![Tag::public_key(*receiver)],
         );
         self.post_event(dm)
+    }
+
+    /// Like [`send_dm`], but wait for the relay's `OK` acknowledgement and return
+    /// the accepted event id. Reference joinstr clients confirm every send this
+    /// way; without it a fire-and-forget event can be silently dropped and a
+    /// peer waits forever for a registration that never arrived.
+    pub fn send_dm_confirmed<T: Into<String>>(
+        &mut self,
+        content: T,
+        receiver: &PublicKey,
+        timeout: Duration,
+    ) -> Result<EventId, Error> {
+        let content = self.encrypt(receiver, content.into())?;
+        let dm = EventBuilder::new(
+            Kind::EncryptedDirectMessage,
+            content,
+            vec![Tag::public_key(*receiver)],
+        );
+        self.post_event_confirmed(dm, timeout)
+    }
+
+    /// Post an event and block until the relay accepts it with `OK`, returning
+    /// its id. Errors on rejection or if no `OK` arrives before `timeout`.
+    pub fn post_event_confirmed(
+        &mut self,
+        event: EventBuilder,
+        timeout: Duration,
+    ) -> Result<EventId, Error> {
+        self.is_connected()?;
+        let event = event
+            .to_event(self.get_keys())
+            .map_err(|_| Error::SignEvent)?;
+        let event_id = event.id;
+        self.send_raw(ClientMessage::event(event).as_json())?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(Error::OkTimeout);
+            }
+            match self.try_receive_message()? {
+                Some(RelayMessage::Ok {
+                    event_id: id,
+                    status,
+                    message,
+                }) if id == event_id => {
+                    return if status {
+                        Ok(event_id)
+                    } else {
+                        Err(Error::EventRejected(message))
+                    };
+                }
+                // EOSE, other events, OK for a different id: keep waiting.
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    }
+
+    /// Receive and parse the next relay message without decrypting DMs, so the
+    /// caller can match control frames such as `OK`.
+    fn try_receive_message(&mut self) -> Result<Option<RelayMessage>, Error> {
+        match self.try_receive_raw()? {
+            Some(RecvMsg::Close) => Err(Error::ConnectionClosed),
+            Some(RecvMsg::Msg(t)) => {
+                let raw = RawRelayMessage::from_json(t).map_err(|_| Error::RawRelayMessage)?;
+                let msg = RelayMessage::try_from(raw).map_err(|_| Error::RelayMessage)?;
+                Ok(Some(msg))
+            }
+            None => Ok(None),
+        }
     }
 
     fn send_raw(&mut self, msg: Message) -> Result<(), Error> {

@@ -19,10 +19,25 @@ use std::{
     fmt::{Debug, Display},
     sync::mpsc,
     thread::{self},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::coinjoin::BitcoinBackend;
+
+/// Socket read timeout for every electrum request.
+///
+/// Without this a server that sends a partial reply and then holds the socket
+/// open parks `read_line` in a blocking `read()` forever: wall-clock deadlines
+/// like [`BATCH_TIMEOUT`] are only evaluated *between* completed reads, so they
+/// can never fire. Generous, because these are single request/response round
+/// trips over tor (a coinjoin's long waits are on the nostr side, not here);
+/// hitting it surfaces as a retryable error, so `with_reconnect` rebuilds the
+/// circuit rather than failing the round.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wall-clock bound on collecting every reply of a batched request. Works in
+/// concert with [`READ_TIMEOUT`], which is what actually lets `recv` return.
+const BATCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -31,6 +46,12 @@ pub enum Error {
     WrongResponse,
     WrongOutPoint,
     TxDoesNotExists,
+    /// A batched request was not fully answered before [`BATCH_TIMEOUT`].
+    BatchTimeout,
+    /// The server rejected a broadcast (bad fee, conflicting spend, non-final
+    /// tx, ...). An application-level verdict, not a transport failure: resending
+    /// it would only be rejected again.
+    BroadcastRejected(String),
 }
 
 impl Display for Error {
@@ -41,6 +62,8 @@ impl Display for Error {
             Error::WrongResponse => write!(f, "Wrong response from electrum server"),
             Error::WrongOutPoint => write!(f, "Requested outpoint did not exists"),
             Error::TxDoesNotExists => write!(f, "Requested transaction did not exists"),
+            Error::BatchTimeout => write!(f, "Batched request timed out"),
+            Error::BroadcastRejected(e) => write!(f, "Broadcast rejected: {e}"),
         }
     }
 }
@@ -48,6 +71,25 @@ impl Display for Error {
 impl From<raw_client::Error> for Error {
     fn from(value: raw_client::Error) -> Self {
         Error::Electrum(format!("{value:?}"))
+    }
+}
+
+/// Whether a broadcast rejection actually means the transaction is already on
+/// the network. Wording differs per implementation (Core, electrs, ElectrumX),
+/// so match the substrings they share.
+fn is_already_known(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("already") && (m.contains("known") || m.contains("mempool") || m.contains("chain"))
+        || m.contains("duplicate")
+        || m.contains("txn-already-in-mempool")
+}
+
+impl Error {
+    /// Whether this error is worth reconnecting and retrying once. Transport and
+    /// framing failures (dropped/stale tor circuit, `WouldBlock`, a desynced
+    /// response) are; logical outcomes (tx absent, unparseable) are not.
+    fn is_retryable(&self) -> bool {
+        matches!(self, Error::Electrum(_) | Error::WrongResponse)
     }
 }
 
@@ -157,13 +199,37 @@ pub struct Client {
     url: String,
     port: u16,
     proxy: Option<String>,
+    // `url` has the `ssl://` scheme stripped, so remember whether it was there:
+    // a reconnect that dropped TLS would talk plaintext to an SSL-only port.
+    ssl: bool,
+    // `new_local` disables certificate verification for self-signed servers.
+    // Rebuilding without it would fail TLS on the first clone or reconnect,
+    // exactly the case that constructor exists for.
+    verify_certificate: bool,
 }
 
 impl Clone for Client {
     fn clone(&self) -> Self {
         // Preserve the proxy: the signer clones its electrum client, and a
         // clone that reconnected directly would leak the real IP mid-coinjoin.
-        Client::new_with_proxy(&self.url, self.port, self.proxy.clone()).unwrap()
+        // Preserve ssl too, or the clone would reconnect in plaintext.
+        let mut inner = RawClient::new_ssl_maybe(&self.url, self.port, self.ssl)
+            .proxy(self.proxy.clone())
+            .verif_certificate(self.verify_certificate);
+        inner.try_connect().expect("electrum reconnect on clone");
+        inner
+            .set_read_timeout(Some(READ_TIMEOUT))
+            .expect("electrum read timeout on clone");
+        Client {
+            inner,
+            index: HashMap::new(),
+            last_id: 0,
+            url: self.url.clone(),
+            port: self.port,
+            proxy: self.proxy.clone(),
+            ssl: self.ssl,
+            verify_certificate: self.verify_certificate,
+        }
     }
 }
 
@@ -190,6 +256,7 @@ impl Client {
         let address = address.to_string().replace("ssl://", "");
         let mut inner = RawClient::new_ssl_maybe(&address, port, ssl).proxy(proxy.clone());
         inner.try_connect()?;
+        inner.set_read_timeout(Some(READ_TIMEOUT))?;
         Ok(Client {
             inner,
             index: HashMap::new(),
@@ -197,7 +264,40 @@ impl Client {
             url: address,
             port,
             proxy,
+            ssl,
+            verify_certificate: true,
         })
+    }
+
+    /// Re-establish the connection after it dropped or went stale (common over
+    /// tor while a coinjoin waits minutes for peers). Rebuilds the inner client
+    /// from the stored url/port/proxy/ssl and clears any in-flight request ids.
+    pub fn reconnect(&mut self) -> Result<(), Error> {
+        let mut inner = RawClient::new_ssl_maybe(&self.url, self.port, self.ssl)
+            .proxy(self.proxy.clone())
+            .verif_certificate(self.verify_certificate);
+        inner.try_connect()?;
+        inner.set_read_timeout(Some(READ_TIMEOUT))?;
+        self.inner = inner;
+        self.index.clear();
+        Ok(())
+    }
+
+    /// Run an idempotent request, and if it fails on a dropped/stale connection
+    /// reconnect once and try again. Read requests routed through here are safe
+    /// to repeat, so a single reconnect turns a torn tor circuit into a hiccup
+    /// instead of a failed coinjoin.
+    fn with_reconnect<T>(
+        &mut self,
+        mut op: impl FnMut(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        match op(self) {
+            Err(e) if e.is_retryable() => {
+                self.reconnect()?;
+                op(self)
+            }
+            other => other,
+        }
     }
 
     /// Create a new local electrum client: SSL certificate validation id disabled in
@@ -211,6 +311,7 @@ impl Client {
         let address = address.to_string().replace("ssl://", "");
         let mut inner = RawClient::new_ssl_maybe(&address, port, ssl).verif_certificate(false);
         inner.try_connect()?;
+        inner.set_read_timeout(Some(READ_TIMEOUT))?;
         Ok(Client {
             inner,
             index: HashMap::new(),
@@ -218,6 +319,8 @@ impl Client {
             url: address,
             port,
             proxy: None,
+            ssl,
+            verify_certificate: false,
         })
     }
 
@@ -232,6 +335,139 @@ impl Client {
         req.id = id;
         self.index.insert(req.id, req.clone());
         id
+    }
+
+    /// Fetch the unspent coins of many scripts in a single batched round trip.
+    ///
+    /// Scanning address by address costs one round trip per address, which is
+    /// unusable over tor. Results are returned in the same order as `scripts`.
+    /// `listunspent` also reports only unspent outputs, so unlike walking the
+    /// history there is no need to fetch and filter whole transactions.
+    pub fn list_unspent_batch(
+        &mut self,
+        scripts: &[ScriptBuf],
+    ) -> Result<Vec<Vec<(TxOut, OutPoint)>>, Error> {
+        self.with_reconnect(|c| c.list_unspent_batch_inner(scripts))
+    }
+
+    fn list_unspent_batch_inner(
+        &mut self,
+        scripts: &[ScriptBuf],
+    ) -> Result<Vec<Vec<(TxOut, OutPoint)>>, Error> {
+        if scripts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut requests = Vec::with_capacity(scripts.len());
+        let mut position = HashMap::new();
+        for (i, script) in scripts.iter().enumerate() {
+            let request = Request::sh_list_unspent(script).id(self.id());
+            position.insert(request.id, i);
+            self.index.insert(request.id, request.clone());
+            requests.push(request);
+        }
+
+        let send = self.inner.try_send_batch(requests.iter().collect());
+        if let Err(e) = send {
+            for request in &requests {
+                self.index.remove(&request.id);
+            }
+            return Err(e.into());
+        }
+
+        let mut out = vec![Vec::new(); scripts.len()];
+        let mut pending = requests.len();
+        let mut result: Result<(), Error> = Ok(());
+        // A batch may come back split over several messages, so keep reading
+        // until every request has been answered. Bound the wait: `recv` blocks
+        // in `read_line` with no read timeout, so without a deadline a server
+        // that answers only some of the ids would hang this thread forever.
+        let deadline = Instant::now() + BATCH_TIMEOUT;
+        while pending > 0 {
+            if Instant::now() >= deadline {
+                result = Err(Error::BatchTimeout);
+                break;
+            }
+            let responses = match self.inner.recv(&self.index) {
+                Ok(r) => r,
+                Err(e) => {
+                    result = Err(e.into());
+                    break;
+                }
+            };
+            for response in responses {
+                // Account for *any* response carrying one of our ids, not just
+                // the expected one: an electrum error (or a mismatched reply)
+                // otherwise leaves the id pending forever.
+                let Some(id) = response.id() else { continue };
+                let Some(i) = position.remove(&id) else {
+                    continue;
+                };
+                self.index.remove(&id);
+                pending -= 1;
+
+                match response {
+                    Response::SHListUnspent(r) => {
+                        out[i] = r
+                            .unspent
+                            .into_iter()
+                            .map(|u| {
+                                (
+                                    TxOut {
+                                        value: Amount::from_sat(u.value as u64),
+                                        script_pubkey: scripts[i].clone(),
+                                    },
+                                    OutPoint {
+                                        txid: u.txid,
+                                        vout: u.vout as u32,
+                                    },
+                                )
+                            })
+                            .collect();
+                    }
+                    Response::Error(ErrorResponse { error, .. }) => {
+                        if result.is_ok() {
+                            result = Err(Error::Electrum(format!("{error:?}")));
+                        }
+                    }
+                    _ => {
+                        if result.is_ok() {
+                            result = Err(Error::WrongResponse);
+                        }
+                    }
+                }
+            }
+        }
+
+        for id in position.keys() {
+            self.index.remove(id);
+        }
+        result?;
+
+        // `listunspent` is server-supplied: it can name outpoints that do not
+        // exist or inflate their value. Signing commits to the amount (BIP143),
+        // so a lie here produces an invalid signature and kills the coinjoin
+        // after this peer has already published its input and output. Confirm
+        // every candidate against the transaction itself, exactly as the
+        // per-address path did, and keep the chain's value rather than the
+        // claimed one. Only found coins are fetched, so the batch win stands.
+        for (i, coins) in out.iter_mut().enumerate() {
+            let mut verified = Vec::with_capacity(coins.len());
+            for (_, outpoint) in coins.iter() {
+                let tx = self.get_tx(outpoint.txid)?;
+                let txout = tx
+                    .output
+                    .get(outpoint.vout as usize)
+                    .ok_or(Error::WrongOutPoint)?;
+                if txout.script_pubkey != scripts[i] {
+                    return Err(Error::WrongOutPoint);
+                }
+                verified.push((txout.clone(), *outpoint));
+            }
+            *coins = verified;
+        }
+
+        Ok(out)
     }
 
     pub fn listen<RQ, RS>(self) -> (mpsc::Sender<RQ>, mpsc::Receiver<RS>)
@@ -504,6 +740,10 @@ impl Client {
     ///   - the response is not of expected type
     ///   - the transaction does not exists
     pub fn get_tx(&mut self, txid: Txid) -> Result<Transaction, Error> {
+        self.with_reconnect(|c| c.get_tx_inner(txid))
+    }
+
+    fn get_tx_inner(&mut self, txid: Txid) -> Result<Transaction, Error> {
         let request = Request::tx_get(txid).id(self.id());
         self.inner.try_send(&request)?;
         let req_id = request.id;
@@ -593,6 +833,10 @@ impl Client {
     ///   - fail sending the request
     ///   - receive a wrong response
     pub fn get_coins_tx_at(&mut self, script: &Script) -> Result<Vec<Txid>, Error> {
+        self.with_reconnect(|c| c.get_coins_tx_at_inner(script))
+    }
+
+    fn get_coins_tx_at_inner(&mut self, script: &Script) -> Result<Vec<Txid>, Error> {
         let request = Request::sh_get_history(script).id(self.id());
         self.inner.try_send(&request)?;
         let req_id = request.id;
@@ -625,6 +869,10 @@ impl Client {
     ///   - fail to send the request
     ///   - get a wrong response
     pub fn broadcast(&mut self, tx: &Transaction) -> Result<(), Error> {
+        self.with_reconnect(|c| c.broadcast_inner(tx))
+    }
+
+    fn broadcast_inner(&mut self, tx: &Transaction) -> Result<(), Error> {
         let raw_tx = serialize_hex(tx);
         log::debug!("electrum::Client().broadcast(): {:?}", raw_tx);
         let request = Request::tx_broadcast(raw_tx);
@@ -665,7 +913,18 @@ impl Client {
                         .map(|c| if c.is_control() { ' ' } else { c })
                         .take(MAX_ERR_LEN)
                         .collect();
-                    return Err(Error::Electrum(sanitized));
+                    // A retry after a desynced read rebroadcasts a tx the
+                    // server already accepted; it then answers "already known".
+                    // That is the tx being on the network, not a rejection, so
+                    // reporting failure would strand a round whose transaction
+                    // actually broadcast.
+                    if is_already_known(&sanitized) {
+                        log::debug!(
+                            "electrum::Client().broadcast(): already known, treating as success: {sanitized}"
+                        );
+                        return Ok(());
+                    }
+                    return Err(Error::BroadcastRejected(sanitized));
                 }
             }
         }
@@ -716,5 +975,40 @@ impl BitcoinBackend for Client {
                 .ok_or(Error::WrongOutPoint)?
                 .value,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_already_known;
+
+    #[test]
+    fn already_known_broadcast_replies_are_recognized() {
+        // Wordings seen from Core / electrs / ElectrumX for a tx that is already
+        // on the network. A rebroadcast after a desynced read must not be
+        // reported as a rejection.
+        for msg in [
+            "Transaction already in block chain",
+            "txn-already-in-mempool",
+            "txn-already-known",
+            "18: txn-already-in-mempool",
+            "duplicate transaction",
+            "ALREADY IN MEMPOOL",
+        ] {
+            assert!(is_already_known(msg), "should be treated as success: {msg}");
+        }
+    }
+
+    #[test]
+    fn real_rejections_are_not_mistaken_for_success() {
+        for msg in [
+            "min relay fee not met",
+            "bad-txns-inputs-missingorspent",
+            "non-final",
+            "insufficient fee, rejecting replacement",
+            "scriptsig-not-pushonly",
+        ] {
+            assert!(!is_already_known(msg), "should stay a rejection: {msg}");
+        }
     }
 }

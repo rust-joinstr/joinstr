@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use joinstr::bip39::Mnemonic;
 use joinstr::interface::{PeerConfig, PoolConfig};
+use joinstr::joinstr::{CoinjoinProgress, Step};
 use joinstr::miniscript::bitcoin::{
     Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TxOut, Txid,
 };
@@ -259,6 +260,102 @@ impl FfiPool {
             public_key: pool.public_key.to_string(),
             version: pool.version.clone(),
         })
+    }
+}
+
+/// A coinjoin progress update, streamed to the caller as the round advances so
+/// it can render a step-by-step timeline. A plain struct (not an enum with
+/// data) so the bindings do not pull in `freezed`. `txid` is set on the
+/// terminal `Done` step, `error` on the terminal `Failed` step.
+pub struct FfiCoinjoinUpdate {
+    pub step: FfiCoinjoinStep,
+    pub txid: Option<String>,
+    pub error: Option<String>,
+    /// Relay event id acknowledging this peer's output registration.
+    pub output_event_id: Option<String>,
+    /// Relay event id acknowledging this peer's input registration.
+    pub input_event_id: Option<String>,
+    /// The finalized coinjoin psbt (base64), set once the input is signed.
+    pub psbt: Option<String>,
+}
+
+/// The coinjoin steps worth showing in a timeline. `Done`/`Failed` are the two
+/// terminal states the bindings synthesize; the crate's `Unconfigured`/
+/// `Configured`/`Failed` bookkeeping states collapse to `Other`.
+pub enum FfiCoinjoinStep {
+    Connecting,
+    Posting,
+    OutputRegistration,
+    InputRegistration,
+    Broadcast,
+    Mined,
+    Done,
+    Failed,
+    Other,
+}
+
+impl From<Step> for FfiCoinjoinStep {
+    fn from(step: Step) -> Self {
+        match step {
+            Step::Connecting => FfiCoinjoinStep::Connecting,
+            Step::Posting => FfiCoinjoinStep::Posting,
+            Step::OutputRegistration => FfiCoinjoinStep::OutputRegistration,
+            Step::InputRegistration => FfiCoinjoinStep::InputRegistration,
+            Step::Broadcast => FfiCoinjoinStep::Broadcast,
+            Step::Mined => FfiCoinjoinStep::Mined,
+            Step::Unconfigured | Step::Configured | Step::Failed => FfiCoinjoinStep::Other,
+        }
+    }
+}
+
+impl FfiCoinjoinUpdate {
+    pub(crate) fn progress(p: CoinjoinProgress) -> Self {
+        FfiCoinjoinUpdate {
+            step: FfiCoinjoinStep::from(p.step),
+            txid: None,
+            error: None,
+            output_event_id: p.output_event_id,
+            input_event_id: p.input_event_id,
+            psbt: p.psbt,
+        }
+    }
+
+    /// Terminal success. Carries forward the detail gathered during the round so
+    /// a consumer rendering only the latest update does not lose the event ids
+    /// and psbt exactly at the end.
+    pub(crate) fn done(txid: String, last: Option<CoinjoinProgress>) -> Self {
+        let last = last.unwrap_or(CoinjoinProgress {
+            step: Step::Broadcast,
+            output_event_id: None,
+            input_event_id: None,
+            psbt: None,
+        });
+        FfiCoinjoinUpdate {
+            step: FfiCoinjoinStep::Done,
+            txid: Some(txid),
+            error: None,
+            output_event_id: last.output_event_id,
+            input_event_id: last.input_event_id,
+            psbt: last.psbt,
+        }
+    }
+
+    /// Terminal failure, likewise carrying the detail gathered so far.
+    pub(crate) fn failed(message: String, last: Option<CoinjoinProgress>) -> Self {
+        let last = last.unwrap_or(CoinjoinProgress {
+            step: Step::Failed,
+            output_event_id: None,
+            input_event_id: None,
+            psbt: None,
+        });
+        FfiCoinjoinUpdate {
+            step: FfiCoinjoinStep::Failed,
+            txid: None,
+            error: Some(message),
+            output_event_id: last.output_event_id,
+            input_event_id: last.input_event_id,
+            psbt: last.psbt,
+        }
     }
 }
 

@@ -70,17 +70,28 @@ typedef struct wire_cst_list_ffi_pool {
   int32_t len;
 } wire_cst_list_ffi_pool;
 
+typedef struct wire_cst_ffi_coinjoin_update {
+  int32_t step;
+  struct wire_cst_list_prim_u_8_strict *txid;
+  struct wire_cst_list_prim_u_8_strict *error;
+  struct wire_cst_list_prim_u_8_strict *output_event_id;
+  struct wire_cst_list_prim_u_8_strict *input_event_id;
+  struct wire_cst_list_prim_u_8_strict *psbt;
+} wire_cst_ffi_coinjoin_update;
+
 typedef struct wire_cst_joinstr_error {
   struct wire_cst_list_prim_u_8_strict *message;
 } wire_cst_joinstr_error;
 
 void frbgen_joinstr_flutter_wire__crate__api__joinstr__initiate_coinjoin(int64_t port_,
                                                                          struct wire_cst_ffi_pool_config *config,
-                                                                         struct wire_cst_ffi_peer_config *peer);
+                                                                         struct wire_cst_ffi_peer_config *peer,
+                                                                         struct wire_cst_list_prim_u_8_strict *progress);
 
 void frbgen_joinstr_flutter_wire__crate__api__joinstr__join_coinjoin(int64_t port_,
                                                                      struct wire_cst_list_prim_u_8_strict *pool_raw_json,
-                                                                     struct wire_cst_ffi_peer_config *peer);
+                                                                     struct wire_cst_ffi_peer_config *peer,
+                                                                     struct wire_cst_list_prim_u_8_strict *progress);
 
 void frbgen_joinstr_flutter_wire__crate__api__joinstr__list_coins(int64_t port_,
                                                                   struct wire_cst_list_prim_u_8_strict *mnemonic,

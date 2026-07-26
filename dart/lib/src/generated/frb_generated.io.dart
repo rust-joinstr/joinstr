@@ -21,6 +21,13 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
   });
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<FfiCoinjoinUpdate>
+      dco_decode_StreamSink_ffi_coinjoin_update_Dco(dynamic raw);
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
@@ -40,6 +47,12 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
 
   @protected
   FfiCoin dco_decode_ffi_coin(dynamic raw);
+
+  @protected
+  FfiCoinjoinStep dco_decode_ffi_coinjoin_step(dynamic raw);
+
+  @protected
+  FfiCoinjoinUpdate dco_decode_ffi_coinjoin_update(dynamic raw);
 
   @protected
   FfiPeerConfig dco_decode_ffi_peer_config(dynamic raw);
@@ -84,6 +97,17 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
   int dco_decode_u_8(dynamic raw);
 
   @protected
+  void dco_decode_unit(dynamic raw);
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<FfiCoinjoinUpdate>
+      sse_decode_StreamSink_ffi_coinjoin_update_Dco(
+          SseDeserializer deserializer);
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
@@ -105,6 +129,13 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
 
   @protected
   FfiCoin sse_decode_ffi_coin(SseDeserializer deserializer);
+
+  @protected
+  FfiCoinjoinStep sse_decode_ffi_coinjoin_step(SseDeserializer deserializer);
+
+  @protected
+  FfiCoinjoinUpdate sse_decode_ffi_coinjoin_update(
+      SseDeserializer deserializer);
 
   @protected
   FfiPeerConfig sse_decode_ffi_peer_config(SseDeserializer deserializer);
@@ -149,7 +180,29 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
   int sse_decode_u_8(SseDeserializer deserializer);
 
   @protected
+  void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_encode_AnyhowException(
+      AnyhowException raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
+  ffi.Pointer<wire_cst_list_prim_u_8_strict>
+      cst_encode_StreamSink_ffi_coinjoin_update_Dco(
+          RustStreamSink<FfiCoinjoinUpdate> raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return cst_encode_String(raw.setupAndSerialize(
+        codec: DcoCodec(
+      decodeSuccessData: dco_decode_ffi_coinjoin_update,
+      decodeErrorData: dco_decode_AnyhowException,
+    )));
+  }
 
   @protected
   ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_encode_String(String raw) {
@@ -258,6 +311,17 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
   }
 
   @protected
+  void cst_api_fill_to_wire_ffi_coinjoin_update(
+      FfiCoinjoinUpdate apiObj, wire_cst_ffi_coinjoin_update wireObj) {
+    wireObj.step = cst_encode_ffi_coinjoin_step(apiObj.step);
+    wireObj.txid = cst_encode_opt_String(apiObj.txid);
+    wireObj.error = cst_encode_opt_String(apiObj.error);
+    wireObj.output_event_id = cst_encode_opt_String(apiObj.outputEventId);
+    wireObj.input_event_id = cst_encode_opt_String(apiObj.inputEventId);
+    wireObj.psbt = cst_encode_opt_String(apiObj.psbt);
+  }
+
+  @protected
   void cst_api_fill_to_wire_ffi_peer_config(
       FfiPeerConfig apiObj, wire_cst_ffi_peer_config wireObj) {
     wireObj.mnemonic = cst_encode_String(apiObj.mnemonic);
@@ -307,6 +371,9 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
   double cst_encode_f_64(double raw);
 
   @protected
+  int cst_encode_ffi_coinjoin_step(FfiCoinjoinStep raw);
+
+  @protected
   int cst_encode_i_32(int raw);
 
   @protected
@@ -317,6 +384,17 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
 
   @protected
   int cst_encode_u_8(int raw);
+
+  @protected
+  void cst_encode_unit(void raw);
+
+  @protected
+  void sse_encode_AnyhowException(
+      AnyhowException self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_StreamSink_ffi_coinjoin_update_Dco(
+      RustStreamSink<FfiCoinjoinUpdate> self, SseSerializer serializer);
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
@@ -341,6 +419,14 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
 
   @protected
   void sse_encode_ffi_coin(FfiCoin self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ffi_coinjoin_step(
+      FfiCoinjoinStep self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ffi_coinjoin_update(
+      FfiCoinjoinUpdate self, SseSerializer serializer);
 
   @protected
   void sse_encode_ffi_peer_config(FfiPeerConfig self, SseSerializer serializer);
@@ -384,6 +470,9 @@ abstract class joinstrApiImplPlatform extends BaseApiImpl<joinstrWire> {
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
@@ -434,11 +523,13 @@ class joinstrWire implements BaseWire {
     int port_,
     ffi.Pointer<wire_cst_ffi_pool_config> config,
     ffi.Pointer<wire_cst_ffi_peer_config> peer,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> progress,
   ) {
     return _wire__crate__api__joinstr__initiate_coinjoin(
       port_,
       config,
       peer,
+      progress,
     );
   }
 
@@ -447,22 +538,28 @@ class joinstrWire implements BaseWire {
               ffi.Void Function(
                   ffi.Int64,
                   ffi.Pointer<wire_cst_ffi_pool_config>,
-                  ffi.Pointer<wire_cst_ffi_peer_config>)>>(
+                  ffi.Pointer<wire_cst_ffi_peer_config>,
+                  ffi.Pointer<wire_cst_list_prim_u_8_strict>)>>(
       'frbgen_joinstr_flutter_wire__crate__api__joinstr__initiate_coinjoin');
   late final _wire__crate__api__joinstr__initiate_coinjoin =
       _wire__crate__api__joinstr__initiate_coinjoinPtr.asFunction<
-          void Function(int, ffi.Pointer<wire_cst_ffi_pool_config>,
-              ffi.Pointer<wire_cst_ffi_peer_config>)>();
+          void Function(
+              int,
+              ffi.Pointer<wire_cst_ffi_pool_config>,
+              ffi.Pointer<wire_cst_ffi_peer_config>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>)>();
 
   void wire__crate__api__joinstr__join_coinjoin(
     int port_,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> pool_raw_json,
     ffi.Pointer<wire_cst_ffi_peer_config> peer,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> progress,
   ) {
     return _wire__crate__api__joinstr__join_coinjoin(
       port_,
       pool_raw_json,
       peer,
+      progress,
     );
   }
 
@@ -471,12 +568,16 @@ class joinstrWire implements BaseWire {
               ffi.Void Function(
                   ffi.Int64,
                   ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-                  ffi.Pointer<wire_cst_ffi_peer_config>)>>(
+                  ffi.Pointer<wire_cst_ffi_peer_config>,
+                  ffi.Pointer<wire_cst_list_prim_u_8_strict>)>>(
       'frbgen_joinstr_flutter_wire__crate__api__joinstr__join_coinjoin');
   late final _wire__crate__api__joinstr__join_coinjoin =
       _wire__crate__api__joinstr__join_coinjoinPtr.asFunction<
-          void Function(int, ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-              ffi.Pointer<wire_cst_ffi_peer_config>)>();
+          void Function(
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+              ffi.Pointer<wire_cst_ffi_peer_config>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>)>();
 
   void wire__crate__api__joinstr__list_coins(
     int port_,
@@ -759,6 +860,21 @@ final class wire_cst_list_ffi_pool extends ffi.Struct {
 
   @ffi.Int32()
   external int len;
+}
+
+final class wire_cst_ffi_coinjoin_update extends ffi.Struct {
+  @ffi.Int32()
+  external int step;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> txid;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> error;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> output_event_id;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> input_event_id;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> psbt;
 }
 
 final class wire_cst_joinstr_error extends ffi.Struct {

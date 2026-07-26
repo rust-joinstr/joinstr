@@ -51,14 +51,14 @@ Future<List<FfiPool>> listPools(
 /// Blocks until the pool fills and the coinjoin transaction is built and
 /// broadcast, then returns its txid (hex). Returns an error if the pool times
 /// out before enough peers join.
-Future<String> initiateCoinjoin(
+Stream<FfiCoinjoinUpdate> initiateCoinjoin(
         {required FfiPoolConfig config, required FfiPeerConfig peer}) =>
     joinstr.instance.api
         .crateApiJoinstrInitiateCoinjoin(config: config, peer: peer);
 
 /// Join an advertised pool, passing the `raw_json` of an [`FfiPool`] from
 /// [`list_pools`]. Blocks until the coinjoin is broadcast; returns its txid.
-Future<String> joinCoinjoin(
+Stream<FfiCoinjoinUpdate> joinCoinjoin(
         {required String poolRawJson, required FfiPeerConfig peer}) =>
     joinstr.instance.api
         .crateApiJoinstrJoinCoinjoin(poolRawJson: poolRawJson, peer: peer);

@@ -2,13 +2,19 @@
 //! [`joinstr::interface`] and are blocking; flutter_rust_bridge runs them off
 //! the UI isolate so Dart awaits each as a `Future`.
 
+use std::sync::Mutex;
+
+use crate::frb_generated::StreamSink;
 use joinstr::interface;
+use joinstr::joinstr::CoinjoinProgress;
 use joinstr::log::warn;
 use joinstr::nostr::Pool;
 use zeroize::Zeroizing;
 
 use crate::api::error::JoinstrError;
-use crate::api::types::{BitcoinNetwork, FfiCoin, FfiPeerConfig, FfiPool, FfiPoolConfig};
+use crate::api::types::{
+    BitcoinNetwork, FfiCoin, FfiCoinjoinUpdate, FfiPeerConfig, FfiPool, FfiPoolConfig,
+};
 
 /// List spendable coins by scanning electrum over derivation indexes
 /// `[range_start, range_end)` on both the receive and change branches.
@@ -73,16 +79,41 @@ pub fn list_pools(
 pub fn initiate_coinjoin(
     config: FfiPoolConfig,
     peer: FfiPeerConfig,
-) -> Result<String, JoinstrError> {
+    progress: StreamSink<FfiCoinjoinUpdate>,
+) -> Result<(), JoinstrError> {
     let pool_config = config.into();
     let peer_config = peer.try_into()?;
-    let txid = interface::initiate_coinjoin(pool_config, peer_config)?;
-    Ok(txid.to_string())
+    // Remember the latest progress so the terminal update can carry the detail
+    // gathered during the round rather than nulling it out.
+    let last: Mutex<Option<CoinjoinProgress>> = Mutex::new(None);
+    let on_step = |p: CoinjoinProgress| {
+        *last.lock().expect("poisoned") = Some(p.clone());
+        let _ = progress.add(FfiCoinjoinUpdate::progress(p));
+    };
+    match interface::initiate_coinjoin_with_progress(pool_config, peer_config, on_step) {
+        Ok(txid) => {
+            let detail = last.lock().expect("poisoned").clone();
+            let _ = progress.add(FfiCoinjoinUpdate::done(txid.to_string(), detail));
+            Ok(())
+        }
+        Err(e) => {
+            let detail = last.lock().expect("poisoned").clone();
+            let _ = progress.add(FfiCoinjoinUpdate::failed(e.to_string(), detail));
+            // Also fail the call: pushing to the sink is best effort (a cancelled
+            // Dart subscription silently drops it), so returning Ok would report
+            // a failed coinjoin as a success.
+            Err(JoinstrError::new(e.to_string()))
+        }
+    }
 }
 
 /// Join an advertised pool, passing the `raw_json` of an [`FfiPool`] from
 /// [`list_pools`]. Blocks until the coinjoin is broadcast; returns its txid.
-pub fn join_coinjoin(pool_raw_json: String, peer: FfiPeerConfig) -> Result<String, JoinstrError> {
+pub fn join_coinjoin(
+    pool_raw_json: String,
+    peer: FfiPeerConfig,
+    progress: StreamSink<FfiCoinjoinUpdate>,
+) -> Result<(), JoinstrError> {
     let mut pool: Pool = joinstr::serde_json::from_str(&pool_raw_json)
         .map_err(|e| JoinstrError::new(format!("invalid pool json: {e}")))?;
     // `Pool::network` is `#[serde(skip_serializing)]` and defaults to mainnet on
@@ -90,6 +121,21 @@ pub fn join_coinjoin(pool_raw_json: String, peer: FfiPeerConfig) -> Result<Strin
     pool.network = peer.native_network();
 
     let peer_config = peer.try_into()?;
-    let txid = interface::join_coinjoin(pool, peer_config)?;
-    Ok(txid)
+    let last: Mutex<Option<CoinjoinProgress>> = Mutex::new(None);
+    let on_step = |p: CoinjoinProgress| {
+        *last.lock().expect("poisoned") = Some(p.clone());
+        let _ = progress.add(FfiCoinjoinUpdate::progress(p));
+    };
+    match interface::join_coinjoin_with_progress(pool, peer_config, on_step) {
+        Ok(txid) => {
+            let detail = last.lock().expect("poisoned").clone();
+            let _ = progress.add(FfiCoinjoinUpdate::done(txid, detail));
+            Ok(())
+        }
+        Err(e) => {
+            let detail = last.lock().expect("poisoned").clone();
+            let _ = progress.add(FfiCoinjoinUpdate::failed(e.to_string(), detail));
+            Err(JoinstrError::new(e.to_string()))
+        }
+    }
 }

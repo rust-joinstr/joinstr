@@ -19,6 +19,19 @@ use std::time::Duration;
 
 /// A random per-connection isolation token. Used as the SOCKS username and
 /// password so Tor assigns the connection its own circuit.
+/// Budget for establishing a connection, shared by every client that dials
+/// through this crate (nostr relay and electrum, plain or TLS).
+///
+/// Over tor the SOCKS `CONNECT` only returns once a fresh circuit is built,
+/// which was measured to spike past 12s against a local tor and is slower still
+/// on a phone's embedded tor. A 10s cap surfaced as "socks5 connect failed"
+/// mid-coinjoin, so keep this generous and keep the paths in step: they all
+/// share one circuit-building cost.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Budget for the handshake that follows the connect (TLS, WebSocket).
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn isolation_token() -> String {
     use rand::Rng;
     let mut rng = rand::rng();
@@ -134,6 +147,13 @@ pub fn connect(
     };
     let mut discard = vec![0u8; bound_len + 2]; // address + port
     read_exact(&mut stream, &mut discard)?;
+
+    // Drop the handshake deadline before handing the socket back: it bounded the
+    // SOCKS negotiation only. Left in place, a caller that never sets its own
+    // timeout would inherit it and see a slow read (a coinjoin waiting minutes
+    // for peers over tor) fail as `WouldBlock` instead of blocking.
+    stream.set_read_timeout(None)?;
+    stream.set_write_timeout(None)?;
 
     Ok(stream)
 }

@@ -1,11 +1,18 @@
-use std::{fmt::Debug, str::FromStr};
+use std::{fmt::Debug, str::FromStr, time::Duration};
 
-use simple_nostr_client::nostr::event::{Event, EventBuilder};
+use simple_nostr_client::nostr::event::{Event, EventBuilder, EventId};
 use simple_nostr_client::nostr::key::PublicKey;
 use simple_nostr_client::nostr::Keys;
 use simple_nostr_client::{WsClient, WsClientBuilder};
 
 use crate::nostr::{error::Error, Pool, PoolMessage};
+
+/// How long to wait for a relay to `OK` a registration event before giving up.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many times to (re)build a fresh circuit and try an isolated send before
+/// giving up. Each attempt is a different tor circuit.
+const ISOLATED_SEND_ATTEMPTS: usize = 3;
 
 #[derive(Default)]
 pub struct NostrClient {
@@ -180,6 +187,61 @@ impl NostrClient {
         let clear_content = msg.to_string()?;
         log::debug!("NostrClient.send_pool_message(): {:#?}", clear_content);
         self.send_dm(npub, clear_content)
+    }
+
+    /// Send a pool message over a brand new connection (a fresh SOCKS isolation
+    /// token, hence a fresh Tor circuit), wait for the relay `OK`, and return the
+    /// event id. Used for output and input registration so the two are posted
+    /// from different exit IPs (unlinkable) and neither is silently dropped. This
+    /// instance keeps its own connection for receiving; the throwaway one is used
+    /// only to publish, then closed.
+    pub fn send_pool_message_isolated(
+        &self,
+        npub: &PublicKey,
+        msg: PoolMessage,
+        proxy: Option<String>,
+    ) -> Result<EventId, Error> {
+        let relay = self.get_relay().ok_or(Error::NotConnected)?;
+        let keys = self.get_keys()?.clone();
+        Self::send_pool_message_detached(relay, keys, proxy, npub, msg)
+    }
+
+    /// The publishing half of [`send_pool_message_isolated`], taking everything
+    /// it needs by value so the caller can drop its lock before the (minutes
+    /// long) network call. Nothing here touches the receiving connection.
+    pub fn send_pool_message_detached(
+        relay: String,
+        keys: Keys,
+        proxy: Option<String>,
+        npub: &PublicKey,
+        msg: PoolMessage,
+    ) -> Result<EventId, Error> {
+        let content = msg.to_string()?;
+
+        // Each attempt opens a new connection, which draws a new SOCKS isolation
+        // token and therefore a different tor circuit. Building a fresh circuit
+        // occasionally overshoots the connect budget or picks a dead relay; a
+        // retry routes around it on another circuit instead of failing the round.
+        let mut last_err = None;
+        for attempt in 0..ISOLATED_SEND_ATTEMPTS {
+            let result = WsClient::new()
+                .relay(relay.clone())
+                .proxy(proxy.clone())
+                .keys(keys.clone())
+                .connect()
+                .and_then(|mut c| c.send_dm_confirmed(content.clone(), npub, CONFIRM_TIMEOUT));
+            match result {
+                Ok(id) => return Ok(id),
+                Err(e) => {
+                    log::warn!("send_pool_message_isolated attempt {attempt} failed: {e:?}");
+                    last_err = Some(e);
+                    if attempt + 1 < ISOLATED_SEND_ATTEMPTS {
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("at least one attempt").into())
     }
 
     /// Subscribe to notifications of NIP04 DMs thatare send tu the client pubkey
