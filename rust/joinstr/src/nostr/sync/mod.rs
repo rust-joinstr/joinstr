@@ -203,6 +203,19 @@ impl NostrClient {
     ) -> Result<EventId, Error> {
         let relay = self.get_relay().ok_or(Error::NotConnected)?;
         let keys = self.get_keys()?.clone();
+        Self::send_pool_message_detached(relay, keys, proxy, npub, msg)
+    }
+
+    /// The publishing half of [`send_pool_message_isolated`], taking everything
+    /// it needs by value so the caller can drop its lock before the (minutes
+    /// long) network call. Nothing here touches the receiving connection.
+    pub fn send_pool_message_detached(
+        relay: String,
+        keys: Keys,
+        proxy: Option<String>,
+        npub: &PublicKey,
+        msg: PoolMessage,
+    ) -> Result<EventId, Error> {
         let content = msg.to_string()?;
 
         // Each attempt opens a new connection, which draws a new SOCKS isolation
