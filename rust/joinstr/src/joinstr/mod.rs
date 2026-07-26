@@ -1590,8 +1590,21 @@ impl<'a> JoinstrInner<'a> {
             // Publish the input over its own fresh circuit (a different exit IP
             // than the output) and wait for the relay OK.
             let event_id =
-                self.client
-                    .send_pool_message_isolated(&npub, msg, self.proxy.clone())?;
+                match self
+                    .client
+                    .send_pool_message_isolated(&npub, msg, self.proxy.clone())
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        // The input was taken above. Now that the send can actually
+                        // fail (it waits for the relay OK), put it back: otherwise
+                        // `state()` serializes `input: None` and `restart()` can
+                        // never re-register it, stranding a peer whose output is
+                        // already published.
+                        self.input = Some(input);
+                        return Err(e.into());
+                    }
+                };
             self.input_event_id = Some(event_id.to_string());
             self.inputs.push(signed_input);
             notif();
