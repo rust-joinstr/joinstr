@@ -194,7 +194,9 @@ pub fn list_coins(
     let mut consecutive_empty = 0u32;
     let mut index = range.0;
     while index < range.1 {
-        let end = (index + INDEXES_PER_BATCH).min(range.1);
+        // Saturating: `check_scan_range` bounds the span but not the start, so
+        // a range near u32::MAX would otherwise overflow here and underflow below.
+        let end = index.saturating_add(INDEXES_PER_BATCH).min(range.1);
         let chunk: Vec<CoinPath> = (index..end)
             .flat_map(|i| [CoinPath::new(0, i), CoinPath::new(1, i)])
             .collect();
@@ -222,7 +224,7 @@ pub fn list_coins(
             // an empty stretch and trigger an early stop.
             Some(n) if n > 0 => consecutive_empty = 0,
             Some(_) => {
-                consecutive_empty += end - index;
+                consecutive_empty = consecutive_empty.saturating_add(end.saturating_sub(index));
                 if consecutive_empty >= SCAN_STOP_GAP {
                     break;
                 }
