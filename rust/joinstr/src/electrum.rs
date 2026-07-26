@@ -19,10 +19,15 @@ use std::{
     fmt::{Debug, Display},
     sync::mpsc,
     thread::{self},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::coinjoin::BitcoinBackend;
+
+/// How long a batched request waits for every id to be answered before giving
+/// up. `recv` has no read timeout of its own, so this is what stops a server
+/// that answers only part of a batch from hanging the caller forever.
+const BATCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -31,6 +36,8 @@ pub enum Error {
     WrongResponse,
     WrongOutPoint,
     TxDoesNotExists,
+    /// A batched request was not fully answered before [`BATCH_TIMEOUT`].
+    BatchTimeout,
 }
 
 impl Display for Error {
@@ -41,6 +48,7 @@ impl Display for Error {
             Error::WrongResponse => write!(f, "Wrong response from electrum server"),
             Error::WrongOutPoint => write!(f, "Requested outpoint did not exists"),
             Error::TxDoesNotExists => write!(f, "Requested transaction did not exists"),
+            Error::BatchTimeout => write!(f, "Batched request timed out"),
         }
     }
 }
@@ -331,8 +339,15 @@ impl Client {
         let mut pending = requests.len();
         let mut result: Result<(), Error> = Ok(());
         // A batch may come back split over several messages, so keep reading
-        // until every request has been answered.
+        // until every request has been answered. Bound the wait: `recv` blocks
+        // in `read_line` with no read timeout, so without a deadline a server
+        // that answers only some of the ids would hang this thread forever.
+        let deadline = Instant::now() + BATCH_TIMEOUT;
         while pending > 0 {
+            if Instant::now() >= deadline {
+                result = Err(Error::BatchTimeout);
+                break;
+            }
             let responses = match self.inner.recv(&self.index) {
                 Ok(r) => r,
                 Err(e) => {
@@ -341,10 +356,18 @@ impl Client {
                 }
             };
             for response in responses {
-                if let Response::SHListUnspent(r) = response {
-                    if let Some(i) = position.remove(&r.id) {
-                        self.index.remove(&r.id);
-                        pending -= 1;
+                // Account for *any* response carrying one of our ids, not just
+                // the expected one: an electrum error (or a mismatched reply)
+                // otherwise leaves the id pending forever.
+                let Some(id) = response.id() else { continue };
+                let Some(i) = position.remove(&id) else {
+                    continue;
+                };
+                self.index.remove(&id);
+                pending -= 1;
+
+                match response {
+                    Response::SHListUnspent(r) => {
                         out[i] = r
                             .unspent
                             .into_iter()
@@ -361,6 +384,16 @@ impl Client {
                                 )
                             })
                             .collect();
+                    }
+                    Response::Error(ErrorResponse { error, .. }) => {
+                        if result.is_ok() {
+                            result = Err(Error::Electrum(format!("{error:?}")));
+                        }
+                    }
+                    _ => {
+                        if result.is_ok() {
+                            result = Err(Error::WrongResponse);
+                        }
                     }
                 }
             }
