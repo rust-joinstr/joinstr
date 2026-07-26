@@ -74,6 +74,16 @@ impl From<raw_client::Error> for Error {
     }
 }
 
+/// Whether a broadcast rejection actually means the transaction is already on
+/// the network. Wording differs per implementation (Core, electrs, ElectrumX),
+/// so match the substrings they share.
+fn is_already_known(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("already") && (m.contains("known") || m.contains("mempool") || m.contains("chain"))
+        || m.contains("duplicate")
+        || m.contains("txn-already-in-mempool")
+}
+
 impl Error {
     /// Whether this error is worth reconnecting and retrying once. Transport and
     /// framing failures (dropped/stale tor circuit, `WouldBlock`, a desynced
@@ -903,6 +913,17 @@ impl Client {
                         .map(|c| if c.is_control() { ' ' } else { c })
                         .take(MAX_ERR_LEN)
                         .collect();
+                    // A retry after a desynced read rebroadcasts a tx the
+                    // server already accepted; it then answers "already known".
+                    // That is the tx being on the network, not a rejection, so
+                    // reporting failure would strand a round whose transaction
+                    // actually broadcast.
+                    if is_already_known(&sanitized) {
+                        log::debug!(
+                            "electrum::Client().broadcast(): already known, treating as success: {sanitized}"
+                        );
+                        return Ok(());
+                    }
                     return Err(Error::BroadcastRejected(sanitized));
                 }
             }
@@ -954,5 +975,40 @@ impl BitcoinBackend for Client {
                 .ok_or(Error::WrongOutPoint)?
                 .value,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_already_known;
+
+    #[test]
+    fn already_known_broadcast_replies_are_recognized() {
+        // Wordings seen from Core / electrs / ElectrumX for a tx that is already
+        // on the network. A rebroadcast after a desynced read must not be
+        // reported as a rejection.
+        for msg in [
+            "Transaction already in block chain",
+            "txn-already-in-mempool",
+            "txn-already-known",
+            "18: txn-already-in-mempool",
+            "duplicate transaction",
+            "ALREADY IN MEMPOOL",
+        ] {
+            assert!(is_already_known(msg), "should be treated as success: {msg}");
+        }
+    }
+
+    #[test]
+    fn real_rejections_are_not_mistaken_for_success() {
+        for msg in [
+            "min relay fee not met",
+            "bad-txns-inputs-missingorspent",
+            "non-final",
+            "insufficient fee, rejecting replacement",
+            "scriptsig-not-pushonly",
+        ] {
+            assert!(!is_already_known(msg), "should stay a rejection: {msg}");
+        }
     }
 }
