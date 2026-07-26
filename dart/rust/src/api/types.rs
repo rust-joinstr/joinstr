@@ -320,25 +320,41 @@ impl FfiCoinjoinUpdate {
         }
     }
 
-    pub(crate) fn done(txid: String) -> Self {
+    /// Terminal success. Carries forward the detail gathered during the round so
+    /// a consumer rendering only the latest update does not lose the event ids
+    /// and psbt exactly at the end.
+    pub(crate) fn done(txid: String, last: Option<CoinjoinProgress>) -> Self {
+        let last = last.unwrap_or(CoinjoinProgress {
+            step: Step::Broadcast,
+            output_event_id: None,
+            input_event_id: None,
+            psbt: None,
+        });
         FfiCoinjoinUpdate {
             step: FfiCoinjoinStep::Done,
             txid: Some(txid),
             error: None,
-            output_event_id: None,
-            input_event_id: None,
-            psbt: None,
+            output_event_id: last.output_event_id,
+            input_event_id: last.input_event_id,
+            psbt: last.psbt,
         }
     }
 
-    pub(crate) fn failed(message: String) -> Self {
+    /// Terminal failure, likewise carrying the detail gathered so far.
+    pub(crate) fn failed(message: String, last: Option<CoinjoinProgress>) -> Self {
+        let last = last.unwrap_or(CoinjoinProgress {
+            step: Step::Failed,
+            output_event_id: None,
+            input_event_id: None,
+            psbt: None,
+        });
         FfiCoinjoinUpdate {
             step: FfiCoinjoinStep::Failed,
             txid: None,
             error: Some(message),
-            output_event_id: None,
-            input_event_id: None,
-            psbt: None,
+            output_event_id: last.output_event_id,
+            input_event_id: last.input_event_id,
+            psbt: last.psbt,
         }
     }
 }
