@@ -263,6 +263,12 @@ impl WpkhHotSigner {
 
         let client = self.client.as_mut().ok_or(Error::NoElectrumClient)?;
         let batch = client.list_unspent_batch(&spks)?;
+        // Results are positional, so a short reply would silently attribute
+        // coins to the wrong derivation path. `list_unspent_batch` errors rather
+        // than returning a partial batch; assert that contract holds.
+        if batch.len() != coin_paths.len() {
+            return Err(Error::Electrum(crate::electrum::Error::WrongResponse));
+        }
 
         let mut count = 0;
         for (coin_path, coins) in coin_paths.iter().zip(batch) {

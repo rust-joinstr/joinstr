@@ -404,6 +404,29 @@ impl Client {
         }
         result?;
 
+        // `listunspent` is server-supplied: it can name outpoints that do not
+        // exist or inflate their value. Signing commits to the amount (BIP143),
+        // so a lie here produces an invalid signature and kills the coinjoin
+        // after this peer has already published its input and output. Confirm
+        // every candidate against the transaction itself, exactly as the
+        // per-address path did, and keep the chain's value rather than the
+        // claimed one. Only found coins are fetched, so the batch win stands.
+        for (i, coins) in out.iter_mut().enumerate() {
+            let mut verified = Vec::with_capacity(coins.len());
+            for (_, outpoint) in coins.iter() {
+                let tx = self.get_tx(outpoint.txid)?;
+                let txout = tx
+                    .output
+                    .get(outpoint.vout as usize)
+                    .ok_or(Error::WrongOutPoint)?;
+                if txout.script_pubkey != scripts[i] {
+                    return Err(Error::WrongOutPoint);
+                }
+                verified.push((txout.clone(), *outpoint));
+            }
+            *coins = verified;
+        }
+
         Ok(out)
     }
 
