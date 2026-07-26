@@ -38,6 +38,10 @@ pub enum Error {
     TxDoesNotExists,
     /// A batched request was not fully answered before [`BATCH_TIMEOUT`].
     BatchTimeout,
+    /// The server rejected a broadcast (bad fee, conflicting spend, non-final
+    /// tx, ...). An application-level verdict, not a transport failure: resending
+    /// it would only be rejected again.
+    BroadcastRejected(String),
 }
 
 impl Display for Error {
@@ -49,6 +53,7 @@ impl Display for Error {
             Error::WrongOutPoint => write!(f, "Requested outpoint did not exists"),
             Error::TxDoesNotExists => write!(f, "Requested transaction did not exists"),
             Error::BatchTimeout => write!(f, "Batched request timed out"),
+            Error::BroadcastRejected(e) => write!(f, "Broadcast rejected: {e}"),
         }
     }
 }
@@ -177,6 +182,10 @@ pub struct Client {
     // `url` has the `ssl://` scheme stripped, so remember whether it was there:
     // a reconnect that dropped TLS would talk plaintext to an SSL-only port.
     ssl: bool,
+    // `new_local` disables certificate verification for self-signed servers.
+    // Rebuilding without it would fail TLS on the first clone or reconnect,
+    // exactly the case that constructor exists for.
+    verify_certificate: bool,
 }
 
 impl Clone for Client {
@@ -184,8 +193,9 @@ impl Clone for Client {
         // Preserve the proxy: the signer clones its electrum client, and a
         // clone that reconnected directly would leak the real IP mid-coinjoin.
         // Preserve ssl too, or the clone would reconnect in plaintext.
-        let mut inner =
-            RawClient::new_ssl_maybe(&self.url, self.port, self.ssl).proxy(self.proxy.clone());
+        let mut inner = RawClient::new_ssl_maybe(&self.url, self.port, self.ssl)
+            .proxy(self.proxy.clone())
+            .verif_certificate(self.verify_certificate);
         inner.try_connect().expect("electrum reconnect on clone");
         Client {
             inner,
@@ -195,6 +205,7 @@ impl Clone for Client {
             port: self.port,
             proxy: self.proxy.clone(),
             ssl: self.ssl,
+            verify_certificate: self.verify_certificate,
         }
     }
 }
@@ -230,6 +241,7 @@ impl Client {
             port,
             proxy,
             ssl,
+            verify_certificate: true,
         })
     }
 
@@ -237,8 +249,9 @@ impl Client {
     /// tor while a coinjoin waits minutes for peers). Rebuilds the inner client
     /// from the stored url/port/proxy/ssl and clears any in-flight request ids.
     pub fn reconnect(&mut self) -> Result<(), Error> {
-        let mut inner =
-            RawClient::new_ssl_maybe(&self.url, self.port, self.ssl).proxy(self.proxy.clone());
+        let mut inner = RawClient::new_ssl_maybe(&self.url, self.port, self.ssl)
+            .proxy(self.proxy.clone())
+            .verif_certificate(self.verify_certificate);
         inner.try_connect()?;
         self.inner = inner;
         self.index.clear();
@@ -281,6 +294,7 @@ impl Client {
             port,
             proxy: None,
             ssl,
+            verify_certificate: false,
         })
     }
 
@@ -873,7 +887,7 @@ impl Client {
                         .map(|c| if c.is_control() { ' ' } else { c })
                         .take(MAX_ERR_LEN)
                         .collect();
-                    return Err(Error::Electrum(sanitized));
+                    return Err(Error::BroadcastRejected(sanitized));
                 }
             }
         }
